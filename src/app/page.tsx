@@ -1,7 +1,8 @@
 "use client";
 
 import { useState } from "react";
-import { Table } from "@/components/Table";
+import dynamic from "next/dynamic";
+const Table = dynamic(() => import("@/components/Table").then((mod) => mod.Table), { ssr: false });
 import { Onboarding } from "@/components/Onboarding";
 import { Region } from "@/lib/mahjong/types";
 

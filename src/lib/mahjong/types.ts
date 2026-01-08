@@ -13,7 +13,7 @@ export interface Tile {
     isDora?: boolean; // Optional: for future use
 }
 
-export type MeldType = "chow" | "pong" | "kong";
+export type MeldType = "chi" | "peng" | "gang";
 
 export interface Meld {
     type: MeldType;
@@ -45,6 +45,10 @@ export interface GameRules {
 export interface RuleStrategy {
     getRules(): GameRules;
     checkWin(hand: Tile[]): boolean;
+    canChi(hand: Tile[], discard: Tile): boolean;
+    canPeng(hand: Tile[], discard: Tile): boolean;
+    canGang(hand: Tile[], discard: Tile | null, isSelfDraw: boolean): boolean;
+    canHu(hand: Tile[], discard: Tile | null, isSelfDraw: boolean): boolean;
     // Future: getValidMelds, getScore, etc.
 }
 
@@ -55,6 +59,24 @@ export interface GameState {
     winner: number | null;
     lastDiscard: Tile | null;
     isGameOver: boolean;
+    // New fields for turn interrupt logic
+    isWaitingForAction: boolean;
+    pendingActions: {
+        [playerIndex: number]: {
+            chi: boolean;
+            peng: boolean;
+            gang: boolean;
+            hu: boolean;
+        };
+    };
+    actionDecisions: {
+        [playerIndex: number]: string; // "chi", "peng", "gang", "hu", "pass"
+    };
     wallCount: number; // Remaining tiles
     rules: GameRules;
+    actionTimer: number; // Countdown for player actions
+    logs: string[]; // Game event logs
+    // Step-by-step debugging state
+    phase: "DRAW" | "DISCARD" | "CHECK" | "RESOLVE";
+    checkIndex: number; // Player index being checked
 }

@@ -22,3 +22,127 @@ body {
   background: var(--background);
   font-family: Arial, Helvetica, sans-serif;
 }
+
+/* Tile Animations */
+@keyframes tileDrawn {
+  0% {
+    transform: translateY(-20px) scale(0.8);
+    opacity: 0;
+  }
+  100% {
+    transform: translateY(0) scale(1);
+    opacity: 1;
+  }
+}
+
+@keyframes tileDiscard {
+  0% {
+    transform: translateY(0) scale(1);
+    opacity: 1;
+  }
+  100% {
+    transform: translateY(10px) scale(0.9);
+    opacity: 0.8;
+  }
+}
+
+@keyframes tileClaim {
+  0% {
+    transform: scale(1);
+    box-shadow: 0 0 0 rgba(250, 204, 21, 0);
+  }
+  50% {
+    transform: scale(1.1);
+    box-shadow: 0 0 20px rgba(250, 204, 21, 0.8);
+  }
+  100% {
+    transform: scale(1);
+    box-shadow: 0 0 0 rgba(250, 204, 21, 0);
+  }
+}
+
+@keyframes slideIn {
+  from {
+    transform: translateX(-20px);
+    opacity: 0;
+  }
+  to {
+    transform: translateX(0);
+    opacity: 1;
+  }
+}
+
+.tile-drawn {
+  animation: tileDrawn 0.3s ease-out;
+}
+
+.tile-discarded {
+  animation: tileDiscard 0.2s ease-in;
+}
+
+.tile-claimed {
+  animation: tileClaim 0.5s ease-in-out;
+}
+
+.meld-new {
+  animation: slideIn 0.3s ease-out;
+}
+
+/* Responsive Design */
+@media (max-width: 768px) {
+  .game-table {
+    transform: scale(0.85);
+  }
+  
+  .player-hand {
+    transform: scale(0.8);
+  }
+}
+
+@media (max-width: 640px) {
+  .game-table {
+    transform: scale(0.7);
+  }
+  
+  .player-hand {
+    transform: scale(0.7);
+  }
+  
+  .action-buttons {
+    transform: scale(0.9);
+  }
+}
+
+@media (max-width: 480px) {
+  .game-table {
+    transform: scale(0.55);
+  }
+  
+  .player-hand {
+    transform: scale(0.6);
+  }
+}
+
+/* Smooth transitions for all interactive elements */
+.tile-interactive {
+  transition: transform 0.15s ease-out, box-shadow 0.15s ease-out;
+}
+
+.tile-interactive:hover {
+  transform: translateY(-4px);
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+}
+
+/* Game info panel animations */
+@keyframes countPulse {
+  0%, 100% {
+    transform: scale(1);
+  }
+  50% {
+    transform: scale(1.05);
+  }
+}
+
+.low-tiles {
+  animation: countPulse 1s ease-in-out infinite;
+}

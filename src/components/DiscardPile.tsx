@@ -14,10 +14,10 @@ export function DiscardPile({ tiles, className, orientation = "bottom" }: Discar
     // Standard is 6 tiles per row
 
     return (
-        <div className={cn("flex flex-wrap gap-1 w-48 h-32 content-start", className)}>
+        <div className={cn("grid grid-cols-6 gap-1 w-64", className)}>
             {tiles.map((tile) => (
-                <div key={tile.id} className="transform scale-75 origin-center">
-                    <Tile tile={tile} className="w-8 h-10 text-xs" />
+                <div key={tile.id} className="relative w-8 h-10">
+                    <Tile tile={tile} className="w-full h-full text-xs" />
                 </div>
             ))}
         </div>
