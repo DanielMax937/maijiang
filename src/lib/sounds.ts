@@ -6,9 +6,17 @@
 // Audio context singleton
 let audioContext: AudioContext | null = null;
 
+interface WindowWithWebkitAudio extends Window {
+    webkitAudioContext?: typeof AudioContext;
+}
+
 function getAudioContext(): AudioContext {
     if (!audioContext) {
-        audioContext = new (window.AudioContext || (window as any).webkitAudioContext)();
+        const AudioContextClass = window.AudioContext || (window as WindowWithWebkitAudio).webkitAudioContext;
+        if (!AudioContextClass) {
+            throw new Error("AudioContext is not available");
+        }
+        audioContext = new AudioContextClass();
     }
     return audioContext;
 }

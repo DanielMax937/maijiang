@@ -1,7 +1,66 @@
-import { GameState, Player, Tile, Region, GameRules } from "./types";
+import { DebugScenario, GameState, LlmAdviceRecord, Player, ReplayEvent, Tile, Region, GameRules } from "./types";
 import { generateDeck, shuffleDeck } from "./deck";
 import { getStrategy } from "./rules";
 import { chooseBotDiscard, decideBotAction } from "./botAI";
+import { buildDebugGamePieces, sortTiles, validateDebugScenario } from "./debug";
+
+function createReplaySnapshot(gameState: GameState): ReplayEvent["snapshot"] {
+    return {
+        players: gameState.players.map((player) => ({
+            ...player,
+            hand: [...player.hand],
+            discards: [...player.discards],
+            melds: player.melds.map((meld) => ({ ...meld, tiles: [...meld.tiles] })),
+        })),
+        deck: [...gameState.deck],
+        currentTurn: gameState.currentTurn,
+        winner: gameState.winner,
+        lastDiscard: gameState.lastDiscard,
+        isGameOver: gameState.isGameOver,
+        isWaitingForAction: gameState.isWaitingForAction,
+        pendingActions: { ...gameState.pendingActions },
+        actionDecisions: { ...gameState.actionDecisions },
+        wallCount: gameState.wallCount,
+        rules: gameState.rules,
+        actionTimer: gameState.actionTimer,
+        logs: [...gameState.logs],
+        phase: gameState.phase,
+        checkIndex: gameState.checkIndex,
+    };
+}
+
+function appendReplayEvent(
+    gameState: GameState,
+    event: Omit<ReplayEvent, "id" | "timestamp" | "snapshot" | "llmAdvice">
+): GameState {
+    const nextState = { ...gameState };
+    const replayEvent: ReplayEvent = {
+        ...event,
+        id: `${Date.now()}-${Math.random().toString(36).slice(2)}`,
+        timestamp: Date.now(),
+        snapshot: createReplaySnapshot(nextState),
+        llmAdvice: [...nextState.llmAdvice],
+    };
+    return {
+        ...nextState,
+        replayEvents: [...nextState.replayEvents, replayEvent],
+    };
+}
+
+export function recordLlmAdvice(gameState: GameState, advice: Omit<LlmAdviceRecord, "timestamp">): GameState {
+    const entry: LlmAdviceRecord = { ...advice, timestamp: Date.now() };
+    const nextState = {
+        ...gameState,
+        llmAdvice: [...gameState.llmAdvice, entry],
+        logs: [...gameState.logs, `LLM ${entry.mode} advice for Player ${entry.playerIndex}: ${entry.result}`],
+    };
+    return appendReplayEvent(nextState, {
+        type: "llm",
+        playerIndex: entry.playerIndex,
+        action: entry.result,
+        message: `LLM ${entry.mode} advice for Player ${entry.playerIndex}: ${entry.result}`,
+    });
+}
 
 export function getRules(region: Region): GameRules {
     switch (region) {
@@ -15,11 +74,12 @@ export function getRules(region: Region): GameRules {
     }
 }
 
-export function initializeGame(region: Region = "chinese"): GameState {
+export function initializeGame(region: Region = "chinese", debugScenario?: DebugScenario): GameState {
     const strategy = getStrategy(region);
     const rules = strategy.getRules();
     const deck = shuffleDeck(generateDeck(rules));
     const players: Player[] = [];
+    const winds: Player["wind"][] = ["east", "south", "west", "north"];
 
     // Initialize 4 players
     for (let i = 0; i < 4; i++) {
@@ -31,58 +91,71 @@ export function initializeGame(region: Region = "chinese"): GameState {
             melds: [],
             isTurn: i === 0, // Player 0 starts
             score: 25000,
-            wind: ["east", "south", "west", "north"][i] as any,
+            wind: winds[i],
         });
     }
 
-    // Deal tiles (based on handSize)
-    // Usually handSize is 13, dealer gets 14th later
-    for (let i = 0; i < rules.handSize; i++) {
+    let gameDeck = deck;
+    if (debugScenario) {
+        validateDebugScenario(region, debugScenario);
+        const debugPieces = buildDebugGamePieces(rules, players, debugScenario);
+        players.splice(0, players.length, ...debugPieces.players);
+        gameDeck = debugPieces.deck;
+    } else {
+        // Deal tiles (based on handSize)
+        // Usually handSize is 13, dealer gets 14th later
+        for (let i = 0; i < rules.handSize; i++) {
+            players.forEach((player) => {
+                const tile = gameDeck.pop();
+                if (tile) player.hand.push(tile);
+            });
+        }
+
         players.forEach((player) => {
-            const tile = deck.pop();
-            if (tile) player.hand.push(tile);
+            player.hand = sortTiles(player.hand);
         });
+
+        // Dealer (Player 0) draws extra tile
+        const firstTile = gameDeck.pop();
+        if (firstTile) {
+            players[0].hand.push(firstTile);
+        }
     }
 
-    // Sort hands
-    players.forEach((player) => {
-        player.hand.sort((a, b) => {
-            if (a.suit !== b.suit) return a.suit.localeCompare(b.suit);
-            if (typeof a.rank === "number" && typeof b.rank === "number") {
-                return a.rank - b.rank;
-            }
-            return String(a.rank).localeCompare(String(b.rank));
-        });
-    });
-
-    // Dealer (Player 0) draws extra tile
-    const firstTile = deck.pop();
-    if (firstTile) {
-        players[0].hand.push(firstTile);
-    }
-
-    return {
+    const initialState: GameState = {
         players,
-        deck,
-        currentTurn: 0,
+        deck: gameDeck,
+        currentTurn: debugScenario?.currentTurn ?? 0,
         winner: null,
         lastDiscard: null,
         isGameOver: false,
-        wallCount: deck.length,
+        wallCount: gameDeck.length,
         rules,
         actionTimer: 20,
         isWaitingForAction: false,
         pendingActions: {},
         actionDecisions: {},
         logs: ["Game initialized"],
-        phase: "DRAW", // Start with Player 0 drawing (or discarding if 14 tiles? P0 starts with 14)
+        phase: players[debugScenario?.currentTurn ?? 0].hand.length % 3 === 2 ? "DISCARD" : "DRAW",
         checkIndex: 0,
+        debugScenario,
+        debugScriptIndex: 0,
+        replayEvents: [],
+        llmAdvice: [],
     };
+
+    return appendReplayEvent(initialState, {
+        type: debugScenario ? "debug" : "init",
+        message: debugScenario ? `Debug scenario loaded: ${debugScenario.name}` : "Game initialized",
+    });
 }
 
 export function drawTile(gameState: GameState, fromDeadWall: boolean = false): GameState {
     if (gameState.deck.length === 0) {
-        return { ...gameState, isGameOver: true }; // Draw game
+        return appendReplayEvent({ ...gameState, isGameOver: true }, {
+            type: "resolve",
+            message: "Wall exhausted. Draw game.",
+        });
     }
 
     const newDeck = [...gameState.deck];
@@ -130,14 +203,19 @@ export function drawTile(gameState: GameState, fromDeadWall: boolean = false): G
 
     const logMsg = `Player ${gameState.currentTurn} drew ${tile.suit} ${tile.rank}`;
 
-    return {
+    return appendReplayEvent({
         ...gameState,
         deck: newDeck,
         players: newPlayers,
         wallCount: newDeck.length,
         logs: [...gameState.logs, logMsg],
         phase: "DISCARD", // After drawing, move to discard phase
-    };
+    }, {
+        type: "draw",
+        playerIndex: gameState.currentTurn,
+        tile,
+        message: logMsg,
+    });
 }
 
 // Draw from dead wall (for Kong replacement)
@@ -146,9 +224,9 @@ export function drawFromDeadWall(gameState: GameState): GameState {
 }
 
 // Helper to check if any player has actions on the discarded tile
-function checkActionsOnDiscard(gameState: GameState, discard: Tile, discarderIndex: number): { pendingActions: { [key: number]: any }, logs: string[] } {
+function checkActionsOnDiscard(gameState: GameState, discard: Tile, discarderIndex: number): { pendingActions: GameState["pendingActions"], logs: string[] } {
     const strategy = getStrategy(gameState.rules.region);
-    const pendingActions: { [key: number]: any } = {};
+    const pendingActions: GameState["pendingActions"] = {};
     const newLogs: string[] = [];
     let hasAction = false;
 
@@ -223,7 +301,12 @@ export function discardTile(gameState: GameState, tileId: string): GameState {
         pendingActions: {}, // Clear previous pending actions
     };
 
-    return tempState;
+    return appendReplayEvent(tempState, {
+        type: "discard",
+        playerIndex: currentPlayerIndex,
+        tile,
+        message: `Player ${currentPlayerIndex} discarded ${tile.suit} ${tile.rank}`,
+    });
 }
 
 // New function to check a single player for actions
@@ -237,21 +320,27 @@ export function performCheck(gameState: GameState): GameState {
     if (checkIndex === currentTurn) {
         const hasPending = Object.keys(gameState.pendingActions).length > 0;
         if (hasPending) {
-            return {
+            return appendReplayEvent({
                 ...gameState,
                 phase: "RESOLVE",
                 isWaitingForAction: true,
                 actionTimer: 20,
                 logs: [...gameState.logs, "Checks complete. Waiting for actions..."],
-            };
+            }, {
+                type: "check",
+                message: "Checks complete. Waiting for actions.",
+            });
         } else {
             // No actions found, next turn
-            return {
+            return appendReplayEvent({
                 ...gameState,
                 phase: "DRAW",
                 currentTurn: (currentTurn + 1) % 4,
                 logs: [...gameState.logs, "No actions. Next turn."],
-            };
+            }, {
+                type: "resolve",
+                message: "No actions. Next turn.",
+            });
         }
     }
 
@@ -282,12 +371,17 @@ export function performCheck(gameState: GameState): GameState {
         };
     }
 
-    return {
+    return appendReplayEvent({
         ...gameState,
         checkIndex: (checkIndex + 1) % 4,
         pendingActions: newPendingActions,
         logs: newLogs,
-    };
+    }, {
+        type: "check",
+        playerIndex: checkIndex,
+        tile: lastDiscard,
+        message: `Player ${checkIndex} checked actions for ${lastDiscard.suit} ${lastDiscard.rank}`,
+    });
 }
 
 // Central State Transition Function
@@ -319,7 +413,7 @@ export function stepGame(gameState: GameState): GameState {
             // This step might need to be called multiple times if we want to simulate "thinking"
             // But for "step" logic, we can just force pass undecided bots
             const pendingPlayers = Object.keys(gameState.pendingActions).map(Number);
-            let newState = { ...gameState };
+            const newState = { ...gameState };
             let changed = false;
 
             pendingPlayers.forEach(pIdx => {
@@ -354,7 +448,7 @@ function performAction(gameState: GameState, playerIndex: number, action: string
     const player = gameState.players[playerIndex];
     const discard = gameState.lastDiscard!;
     let newHand = [...player.hand];
-    let newMelds = [...player.melds];
+    const newMelds = [...player.melds];
 
     // Remove discard from discarder's pile (it's being claimed)
     // We need to find who discarded it. gameState.lastDiscard is just the tile.
@@ -436,7 +530,7 @@ function performAction(gameState: GameState, playerIndex: number, action: string
         melds: newMelds
     };
 
-    return {
+    return appendReplayEvent({
         ...gameState,
         players: newPlayers,
         currentTurn: playerIndex, // Turn moves to actor
@@ -447,7 +541,13 @@ function performAction(gameState: GameState, playerIndex: number, action: string
         lastDiscard: null, // Discard claimed
         logs: [...gameState.logs, `Player ${playerIndex} performed ${action}`],
         phase: "DISCARD", // Actor must now discard
-    };
+    }, {
+        type: "action",
+        playerIndex,
+        tile: discard,
+        action,
+        message: `Player ${playerIndex} performed ${action}`,
+    });
 }
 
 export function resolvePendingActions(gameState: GameState): GameState {
@@ -465,7 +565,7 @@ export function resolvePendingActions(gameState: GameState): GameState {
     if (actors.length === 0) {
         // All passed
         const nextTurn = (gameState.currentTurn + 1) % 4;
-        return {
+        return appendReplayEvent({
             ...gameState,
             currentTurn: nextTurn,
             isWaitingForAction: false,
@@ -474,7 +574,10 @@ export function resolvePendingActions(gameState: GameState): GameState {
             actionTimer: 20,
             logs: [...gameState.logs, "All players passed"],
             phase: "DRAW", // Next player draws
-        };
+        }, {
+            type: "resolve",
+            message: "All players passed",
+        });
     }
 
     // Sort actors by priority
@@ -500,7 +603,7 @@ export function resolvePendingActions(gameState: GameState): GameState {
     const winningAction = actionDecisions[winnerIndex];
 
     if (winningAction === "hu") {
-        return {
+        return appendReplayEvent({
             ...gameState,
             winner: winnerIndex,
             isGameOver: true,
@@ -508,7 +611,12 @@ export function resolvePendingActions(gameState: GameState): GameState {
             pendingActions: {},
             actionDecisions: {},
             logs: [...gameState.logs, `Player ${winnerIndex} wins with Hu!`],
-        };
+        }, {
+            type: "win",
+            playerIndex: winnerIndex,
+            action: "hu",
+            message: `Player ${winnerIndex} wins with Hu!`,
+        });
     }
 
     // Perform Action (Peng/Gang/Chi)
@@ -574,4 +682,3 @@ export function performJiaGang(gameState: GameState, playerIndex: number, tileId
         logs: [...gameState.logs, `Player ${playerIndex} performs Jia Gang (Add Kong)`],
     }, true);
 }
-

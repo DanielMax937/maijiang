@@ -1,10 +1,9 @@
 "use client";
 
 import React, { useEffect, useState, useRef } from "react";
-import { GameState, Player, Tile as MahjongTileType, Region, RuleStrategy } from "@/lib/mahjong/types";
-import { initializeGame, drawTile, discardTile, getRules, resolvePendingActions, stepGame } from "@/lib/mahjong/game";
+import { DebugScenario, GameState, Region, ReplayEvent } from "@/lib/mahjong/types";
+import { initializeGame, drawTile, discardTile, recordLlmAdvice, resolvePendingActions, stepGame } from "@/lib/mahjong/game";
 import { Hand } from "./Hand";
-import { Tile } from "./Tile";
 import { DiscardPile } from "./DiscardPile";
 import { TurnIndicator } from "./TurnIndicator";
 import { ActionButtons } from "./ActionButtons";
@@ -13,31 +12,260 @@ import { GameOverScreen } from "./GameOverScreen";
 import { GameInfo } from "./GameInfo";
 import { cn } from "@/lib/utils";
 import { getStrategy } from "@/lib/mahjong/rules";
+import { chooseBotDiscard, decideBotAction } from "@/lib/mahjong/botAI";
+import { MahjongAction, requestMahjongAI } from "@/lib/mahjong/llmAI";
+import { DEBUG_SCENARIOS, formatTile } from "@/lib/mahjong/debug";
 
-export function Table() {
+interface TableProps {
+    region?: Region;
+}
+
+interface LLMDebugEntry {
+    id: string;
+    playerIndex: number;
+    mode: "discard" | "action" | "advice";
+    result: string;
+    analysis: string;
+    fallback?: boolean;
+}
+
+export function Table({ region: initialRegion = "chinese" }: TableProps) {
     const [gameState, setGameState] = useState<GameState | null>(null);
     const [isDevMode, setIsDevMode] = useState(false);
     const [isPaused, setIsPaused] = useState(false);
     const [autoPause, setAutoPause] = useState(false);
+    const [isLlmDebug, setIsLlmDebug] = useState(false);
+    const [llmDebugEntries, setLlmDebugEntries] = useState<LLMDebugEntry[]>([]);
+    const [thinkingPlayer, setThinkingPlayer] = useState<number | null>(null);
+    const [isAdvancedDebug, setIsAdvancedDebug] = useState(false);
+    const [debugScenarioText, setDebugScenarioText] = useState(JSON.stringify(DEBUG_SCENARIOS[0], null, 2));
+    const [debugError, setDebugError] = useState<string | null>(null);
+    const [showReplay, setShowReplay] = useState(false);
+    const [replayIndex, setReplayIndex] = useState(0);
 
     // Refs to avoid stale closures in async loops
     const isPausedRef = useRef(isPaused);
     const autoPauseRef = useRef(autoPause);
+    const llmInFlightRef = useRef(false);
+    const adviceInFlightRef = useRef(false);
+    const adviceKeyRef = useRef("");
 
     useEffect(() => {
         isPausedRef.current = isPaused;
         autoPauseRef.current = autoPause;
     }, [isPaused, autoPause]);
 
-    const [region, setRegion] = useState<Region>("chinese");
+    const [region] = useState<Region>(initialRegion);
     const [mounted, setMounted] = useState(false);
     const [error, setError] = useState<string | null>(null);
+
+    const addLlmDebugEntry = (entry: Omit<LLMDebugEntry, "id">) => {
+        setLlmDebugEntries((prev) => [
+            { ...entry, id: `${Date.now()}-${Math.random()}` },
+            ...prev,
+        ].slice(0, 12));
+    };
+
+    const recordAdviceOnCurrentState = (entry: Omit<LLMDebugEntry, "id">) => {
+        setGameState((current) => {
+            if (!current) return current;
+            return recordLlmAdvice(current, {
+                playerIndex: entry.playerIndex,
+                mode: entry.mode,
+                result: entry.result,
+                analysis: entry.analysis,
+                fallback: entry.fallback,
+            });
+        });
+    };
+
+    const runBotDiscardWithLLM = async (state: GameState) => {
+        const playerIndex = state.currentTurn;
+        const fallbackTileId = chooseBotDiscard(state.players[playerIndex].hand);
+        llmInFlightRef.current = true;
+        setThinkingPlayer(playerIndex);
+
+        try {
+            const response = await requestMahjongAI({
+                mode: "discard",
+                gameState: state,
+                playerIndex,
+            });
+            const discardTileId = response.discardTileId || fallbackTileId;
+            addLlmDebugEntry({
+                playerIndex,
+                mode: "discard",
+                result: `discard ${discardTileId}`,
+                analysis: response.analysis,
+                fallback: response.fallback,
+            });
+            recordAdviceOnCurrentState({
+                playerIndex,
+                mode: "discard",
+                result: `discard ${discardTileId}`,
+                analysis: response.analysis,
+                fallback: response.fallback,
+            });
+
+            setGameState((current) => {
+                if (!current || current.isGameOver || current.phase !== "DISCARD" || current.currentTurn !== playerIndex) {
+                    return current;
+                }
+                return discardTile(current, discardTileId);
+            });
+        } catch (err) {
+            const message = err instanceof Error ? err.message : "Unknown LLM error";
+            addLlmDebugEntry({
+                playerIndex,
+                mode: "discard",
+                result: `fallback discard ${fallbackTileId}`,
+                analysis: `LLM 决策失败，使用规则 AI。原因：${message}`,
+                fallback: true,
+            });
+            recordAdviceOnCurrentState({
+                playerIndex,
+                mode: "discard",
+                result: `fallback discard ${fallbackTileId}`,
+                analysis: `LLM 决策失败，使用规则 AI。原因：${message}`,
+                fallback: true,
+            });
+            setGameState((current) => {
+                if (!current || current.isGameOver || current.phase !== "DISCARD" || current.currentTurn !== playerIndex) {
+                    return current;
+                }
+                return discardTile(current, fallbackTileId);
+            });
+        } finally {
+            llmInFlightRef.current = false;
+            setThinkingPlayer(null);
+        }
+    };
+
+    const runBotActionsWithLLM = async (state: GameState) => {
+        const pendingBotPlayers = Object.keys(state.pendingActions)
+            .map(Number)
+            .filter((playerIndex) => playerIndex !== 0 && !state.actionDecisions[playerIndex]);
+
+        if (pendingBotPlayers.length === 0) return;
+
+        llmInFlightRef.current = true;
+        setThinkingPlayer(pendingBotPlayers[0]);
+
+        const decisions = await Promise.all(pendingBotPlayers.map(async (playerIndex) => {
+            const pending = state.pendingActions[playerIndex];
+            const fallbackAction = decideBotAction(state, playerIndex, pending);
+
+            try {
+                const response = await requestMahjongAI({
+                    mode: "action",
+                    gameState: state,
+                    playerIndex,
+                    availableActions: { ...pending, pass: true },
+                });
+                const action = response.action || fallbackAction;
+                addLlmDebugEntry({
+                    playerIndex,
+                    mode: "action",
+                    result: action,
+                    analysis: response.analysis,
+                    fallback: response.fallback,
+                });
+                recordAdviceOnCurrentState({
+                    playerIndex,
+                    mode: "action",
+                    result: action,
+                    analysis: response.analysis,
+                    fallback: response.fallback,
+                });
+                return [playerIndex, action] as const;
+            } catch (err) {
+                const message = err instanceof Error ? err.message : "Unknown LLM error";
+                addLlmDebugEntry({
+                    playerIndex,
+                    mode: "action",
+                    result: `fallback ${fallbackAction}`,
+                    analysis: `LLM 决策失败，使用规则 AI。原因：${message}`,
+                    fallback: true,
+                });
+                recordAdviceOnCurrentState({
+                    playerIndex,
+                    mode: "action",
+                    result: `fallback ${fallbackAction}`,
+                    analysis: `LLM 决策失败，使用规则 AI。原因：${message}`,
+                    fallback: true,
+                });
+                return [playerIndex, fallbackAction] as const;
+            }
+        }));
+
+        setGameState((current) => {
+            if (!current || current.isGameOver || current.phase !== "RESOLVE") return current;
+            const actionDecisions = { ...current.actionDecisions };
+            let logs = [...current.logs];
+
+            decisions.forEach(([playerIndex, action]) => {
+                if (!current.pendingActions[playerIndex] || actionDecisions[playerIndex]) return;
+                actionDecisions[playerIndex] = action;
+                logs = [...logs, action !== "pass" ? `Bot ${playerIndex} chooses ${action.toUpperCase()}` : `Bot ${playerIndex} passes`];
+            });
+
+            return resolvePendingActions({ ...current, actionDecisions, logs });
+        });
+
+        llmInFlightRef.current = false;
+        setThinkingPlayer(null);
+    };
+
+    const requestHumanAdvice = async (state: GameState, availableActions: Partial<Record<MahjongAction, boolean>>) => {
+        adviceInFlightRef.current = true;
+        try {
+            const response = await requestMahjongAI({
+                mode: "advice",
+                gameState: state,
+                playerIndex: 0,
+                availableActions,
+            });
+            addLlmDebugEntry({
+                playerIndex: 0,
+                mode: "advice",
+                result: response.action || response.discardTileId || "advice",
+                analysis: response.analysis,
+                fallback: response.fallback,
+            });
+            recordAdviceOnCurrentState({
+                playerIndex: 0,
+                mode: "advice",
+                result: response.action || response.discardTileId || "advice",
+                analysis: response.analysis,
+                fallback: response.fallback,
+            });
+        } catch (err) {
+            const message = err instanceof Error ? err.message : "Unknown LLM error";
+            addLlmDebugEntry({
+                playerIndex: 0,
+                mode: "advice",
+                result: "advice failed",
+                analysis: `无法获取玩家建议：${message}`,
+                fallback: true,
+            });
+            recordAdviceOnCurrentState({
+                playerIndex: 0,
+                mode: "advice",
+                result: "advice failed",
+                analysis: `无法获取玩家建议：${message}`,
+                fallback: true,
+            });
+        } finally {
+            adviceInFlightRef.current = false;
+        }
+    };
 
     useEffect(() => {
         setMounted(true);
         try {
             const initialGame = initializeGame(region);
             setGameState(initialGame);
+            setLlmDebugEntries([]);
         } catch (err) {
             console.error("Failed to initialize game:", err);
             setError(err instanceof Error ? err.message : "Unknown error");
@@ -48,6 +276,7 @@ export function Table() {
     useEffect(() => {
         if (!gameState || gameState.isGameOver || !mounted) return;
         if (isPaused) return; // Pause Check
+        if (isAdvancedDebug) return;
 
         // If autoPause is ON, we don't run the interval. User clicks "Next" manually.
         if (autoPause) return;
@@ -55,6 +284,7 @@ export function Table() {
         const timer = setInterval(() => {
             setGameState(prevState => {
                 if (!prevState || prevState.isGameOver) return prevState;
+                if (llmInFlightRef.current) return prevState;
 
                 // If it's human's turn to DISCARD, we don't step automatically
                 // Unless we implement auto-discard for human later
@@ -62,9 +292,24 @@ export function Table() {
                     return prevState;
                 }
 
+                if (prevState.phase === "DISCARD" && prevState.currentTurn !== 0) {
+                    void runBotDiscardWithLLM(prevState);
+                    return prevState;
+                }
+
                 // If waiting for human input in RESOLVE phase, don't step
                 if (prevState.phase === "RESOLVE" && prevState.pendingActions[0] && !prevState.actionDecisions[0]) {
                     return prevState;
+                }
+
+                if (prevState.phase === "RESOLVE") {
+                    const pendingBots = Object.keys(prevState.pendingActions)
+                        .map(Number)
+                        .some((playerIndex) => playerIndex !== 0 && !prevState.actionDecisions[playerIndex]);
+                    if (pendingBots) {
+                        void runBotActionsWithLLM(prevState);
+                        return prevState;
+                    }
                 }
 
                 const newState = stepGame(prevState);
@@ -81,12 +326,82 @@ export function Table() {
         }, 1000); // 1 second per step for visibility
 
         return () => clearInterval(timer);
-    }, [gameState?.isGameOver, isPaused, autoPause, mounted]);
+    }, [gameState?.isGameOver, isPaused, autoPause, mounted, isAdvancedDebug]);
+
+    const findScriptTileId = (state: GameState, playerIndex: number, requestedTile?: string) => {
+        const hand = state.players[playerIndex]?.hand || [];
+        if (hand.length === 0) return "";
+        if (!requestedTile) return hand[0].id;
+        return hand.find((tile) => tile.id === requestedTile || formatTile(tile) === requestedTile)?.id || hand[0].id;
+    };
+
+    const runScriptStep = (state: GameState): GameState | null => {
+        const script = state.debugScenario?.script || [];
+        const stepIndex = state.debugScriptIndex || 0;
+        const step = script[stepIndex];
+        if (!isAdvancedDebug || !step) return null;
+        if (step.phase && state.phase !== step.phase) return null;
+        if (state.currentTurn !== step.playerIndex && step.phase !== "RESOLVE") return null;
+
+        if (step.phase === "DISCARD" || (!step.phase && state.phase === "DISCARD")) {
+            const tileId = findScriptTileId(state, step.playerIndex, step.tile);
+            if (!tileId || state.currentTurn !== step.playerIndex) return null;
+            return {
+                ...discardTile(state, tileId),
+                debugScriptIndex: stepIndex + 1,
+            };
+        }
+
+        if (step.phase === "RESOLVE" || (!step.phase && state.phase === "RESOLVE")) {
+            if (!step.action) return null;
+            const newDecisions = { ...state.actionDecisions, [step.playerIndex]: step.action };
+            const pendingPlayers = Object.keys(state.pendingActions).map(Number);
+            const allDecided = pendingPlayers.every((p) => newDecisions[p] !== undefined);
+            const nextState = {
+                ...state,
+                actionDecisions: newDecisions,
+                logs: [...state.logs, `Script: Player ${step.playerIndex} ${step.action}${step.note ? ` (${step.note})` : ""}`],
+                debugScriptIndex: stepIndex + 1,
+            };
+            return allDecided ? resolvePendingActions(nextState) : nextState;
+        }
+
+        return null;
+    };
 
     // Handle "Next" Step manually
     const handleNextStep = () => {
         setGameState(prev => {
             if (!prev) return null;
+            if (llmInFlightRef.current) return prev;
+            const scriptedState = runScriptStep(prev);
+            if (scriptedState) return scriptedState;
+            if (isAdvancedDebug && prev.phase === "DISCARD" && prev.currentTurn !== 0) {
+                setDebugError("Advanced Debug is waiting for a scripted discard for this bot.");
+                return prev;
+            }
+            if (isAdvancedDebug && prev.phase === "RESOLVE") {
+                const waitingPlayers = Object.keys(prev.pendingActions)
+                    .map(Number)
+                    .filter((playerIndex) => !prev.actionDecisions[playerIndex]);
+                if (waitingPlayers.some((playerIndex) => playerIndex !== 0)) {
+                    setDebugError(`Advanced Debug is waiting for scripted reactions: P${waitingPlayers.join(", P")}.`);
+                    return prev;
+                }
+            }
+            if (prev.phase === "DISCARD" && prev.currentTurn !== 0) {
+                void runBotDiscardWithLLM(prev);
+                return prev;
+            }
+            if (prev.phase === "RESOLVE") {
+                const pendingBots = Object.keys(prev.pendingActions)
+                    .map(Number)
+                    .some((playerIndex) => playerIndex !== 0 && !prev.actionDecisions[playerIndex]);
+                if (pendingBots) {
+                    void runBotActionsWithLLM(prev);
+                    return prev;
+                }
+            }
             return stepGame(prev);
         });
     };
@@ -109,7 +424,7 @@ export function Table() {
 
                 // If timer hits 0 and we are waiting for actions, auto-pass undecided players
                 if (prev.actionTimer <= 0 && prev.isWaitingForAction) {
-                    let newState = { ...prev };
+                    const newState = { ...prev };
                     const pendingPlayers = Object.keys(newState.pendingActions).map(Number);
 
                     // Force pass for anyone who hasn't decided
@@ -159,13 +474,6 @@ export function Table() {
             return () => clearTimeout(timer);
         }
     }, [gameState?.currentTurn, gameState?.players[0].hand.length, isPaused]);
-
-
-    if (!mounted) return <div className="flex items-center justify-center h-screen bg-[#1e5128] text-white">Loading...</div>;
-    if (error) return <div className="flex items-center justify-center h-screen text-red-500">Error: {error}</div>;
-    if (!gameState) return <div className="flex items-center justify-center h-screen bg-[#1e5128] text-white">Loading...</div>;
-
-    const player = gameState.players[0];
 
     // Real Action Availability based on Game Rules
     const getAvailableActions = (playerIndex: number) => {
@@ -226,6 +534,30 @@ export function Table() {
         setGameState(newState);
     };
 
+    const applyDebugScenario = (scenario: DebugScenario) => {
+        try {
+            const newGame = initializeGame(region, scenario);
+            setGameState(newGame);
+            setLlmDebugEntries([]);
+            setDebugError(null);
+            setIsAdvancedDebug(true);
+            setIsPaused(true);
+            setAutoPause(true);
+            setReplayIndex(0);
+        } catch (err) {
+            setDebugError(err instanceof Error ? err.message : "Invalid debug scenario");
+        }
+    };
+
+    const applyCustomDebugScenario = () => {
+        try {
+            const parsed = JSON.parse(debugScenarioText) as DebugScenario;
+            applyDebugScenario(parsed);
+        } catch (err) {
+            setDebugError(err instanceof Error ? err.message : "Invalid debug scenario JSON");
+        }
+    };
+
     const setupTestHand = () => {
         if (!gameState) return;
 
@@ -254,8 +586,40 @@ export function Table() {
     const handleNewGame = () => {
         const newGame = initializeGame(region);
         setGameState(newGame);
+        setLlmDebugEntries([]);
         setIsPaused(false);
+        setIsAdvancedDebug(false);
+        setDebugError(null);
+        setReplayIndex(0);
     };
+
+    useEffect(() => {
+        if (!gameState || !isDevMode || !isLlmDebug || gameState.isGameOver || adviceInFlightRef.current) return;
+        const isHumanDiscard = gameState.phase === "DISCARD" && gameState.currentTurn === 0;
+        const isHumanAction = gameState.phase === "RESOLVE" && gameState.pendingActions[0] && !gameState.actionDecisions[0];
+        if (!isHumanDiscard && !isHumanAction) return;
+
+        const availableActions = getAvailableActions(0);
+        const key = [
+            gameState.phase,
+            gameState.currentTurn,
+            gameState.players[0].hand.map((tile) => tile.id).join("|"),
+            gameState.logs.length,
+            JSON.stringify(availableActions),
+        ].join(":");
+
+        if (adviceKeyRef.current === key) return;
+        adviceKeyRef.current = key;
+        void requestHumanAdvice(gameState, availableActions);
+    }, [gameState, isDevMode, isLlmDebug]);
+
+    if (!mounted) return <div className="flex items-center justify-center h-screen bg-[#1e5128] text-white">Loading...</div>;
+    if (error) return <div className="flex items-center justify-center h-screen text-red-500">Error: {error}</div>;
+    if (!gameState) return <div className="flex items-center justify-center h-screen bg-[#1e5128] text-white">Loading...</div>;
+
+    const player = gameState.players[0];
+    const replayEvents = gameState.replayEvents || [];
+    const currentReplayEvent = replayEvents[Math.min(replayIndex, Math.max(0, replayEvents.length - 1))];
 
     return (
         <div className="flex flex-col items-center justify-center min-h-screen bg-[#0f2912] relative overflow-hidden">
@@ -286,6 +650,48 @@ export function Table() {
                         >
                             Setup Test Hand
                         </button>
+                        <div className="grid grid-cols-1 gap-1 w-80">
+                            <button
+                                onClick={() => {
+                                    setDebugScenarioText(JSON.stringify(DEBUG_SCENARIOS[0], null, 2));
+                                    applyDebugScenario(DEBUG_SCENARIOS[0]);
+                                }}
+                                className="px-2 py-1 bg-indigo-600 text-xs rounded hover:bg-indigo-500"
+                            >
+                                Load Peng/Chi Debug
+                            </button>
+                            <button
+                                onClick={() => {
+                                    setDebugScenarioText(JSON.stringify(DEBUG_SCENARIOS[1], null, 2));
+                                    applyDebugScenario(DEBUG_SCENARIOS[1]);
+                                }}
+                                className="px-2 py-1 bg-indigo-600 text-xs rounded hover:bg-indigo-500"
+                            >
+                                Load Hu Debug
+                            </button>
+                            <textarea
+                                value={debugScenarioText}
+                                onChange={(event) => setDebugScenarioText(event.target.value)}
+                                className="h-28 resize-none rounded bg-black/70 p-2 text-[10px] text-gray-100 border border-gray-600"
+                                spellCheck={false}
+                            />
+                            <button
+                                onClick={applyCustomDebugScenario}
+                                className="px-2 py-1 bg-purple-700 text-xs rounded hover:bg-purple-600"
+                            >
+                                Apply Custom Debug
+                            </button>
+                            {debugError && (
+                                <div className="rounded border border-red-500/70 bg-red-950/70 p-2 text-[10px] text-red-100">
+                                    {debugError}
+                                </div>
+                            )}
+                            {isAdvancedDebug && (
+                                <div className="rounded border border-indigo-500/70 bg-indigo-950/70 p-2 text-[10px] text-indigo-100">
+                                    Advanced Debug active. AI execution is paused; use Next, script steps, or manual Player 0 actions.
+                                </div>
+                            )}
+                        </div>
                         <div className="h-px bg-gray-500 w-full my-1" />
                         <div className="flex items-center gap-2">
                             <button
@@ -313,6 +719,26 @@ export function Table() {
                             />
                             Auto-Pause (Step)
                         </label>
+                        <label className="text-xs flex items-center gap-2 cursor-pointer">
+                            <input
+                                type="checkbox"
+                                checked={isLlmDebug}
+                                onChange={(e) => setIsLlmDebug(e.target.checked)}
+                            />
+                            LLM Debug
+                        </label>
+                        {thinkingPlayer !== null && (
+                            <div className="text-[10px] text-amber-300">Player {thinkingPlayer} thinking...</div>
+                        )}
+                        <button
+                            onClick={() => {
+                                setReplayIndex(Math.max(0, replayEvents.length - 1));
+                                setShowReplay(true);
+                            }}
+                            className="px-2 py-1 bg-emerald-700 text-xs rounded hover:bg-emerald-600 w-full"
+                        >
+                            Replay ({replayEvents.length})
+                        </button>
 
                         {/* Game Log Panel */}
                         <div className="mt-2 w-64 h-48 bg-black/80 rounded p-2 overflow-y-auto text-[10px] font-mono border border-gray-600">
@@ -326,9 +752,39 @@ export function Table() {
                                 ))}
                             </div>
                         </div>
+                        {isLlmDebug && (
+                            <div className="w-80 max-h-80 bg-black/85 rounded p-2 overflow-y-auto text-[10px] border border-amber-600/60">
+                                <div className="font-bold text-amber-300 mb-1 sticky top-0 bg-black/85 w-full">LLM Analysis</div>
+                                <div className="flex flex-col gap-2">
+                                    {llmDebugEntries.length === 0 ? (
+                                        <div className="text-gray-400">No LLM decisions yet.</div>
+                                    ) : llmDebugEntries.map((entry) => (
+                                        <div key={entry.id} className="border-b border-gray-700 pb-2 last:border-0">
+                                            <div className="flex items-center justify-between gap-2 text-gray-300">
+                                                <span>P{entry.playerIndex} / {entry.mode}</span>
+                                                <span className={entry.fallback ? "text-red-300" : "text-green-300"}>{entry.result}</span>
+                                            </div>
+                                            <div className="mt-1 whitespace-pre-wrap leading-snug text-gray-100">{entry.analysis}</div>
+                                        </div>
+                                    ))}
+                                </div>
+                            </div>
+                        )}
                     </div>
                 )}
             </div>
+
+            {showReplay && currentReplayEvent && (
+                <ReplayPanel
+                    event={currentReplayEvent}
+                    index={Math.min(replayIndex, replayEvents.length - 1)}
+                    total={replayEvents.length}
+                    onClose={() => setShowReplay(false)}
+                    onPrev={() => setReplayIndex((index) => Math.max(0, index - 1))}
+                    onNext={() => setReplayIndex((index) => Math.min(replayEvents.length - 1, index + 1))}
+                    onChangeIndex={setReplayIndex}
+                />
+            )}
 
             {/* Center Table (Discard Area) - Fixed Size in Middle */}
             <div className="fixed inset-0 m-auto w-[400px] h-[400px] bg-[#1e5128] rounded-xl border-4 border-[#2a6b35] shadow-2xl flex items-center justify-center z-0">
@@ -420,6 +876,142 @@ export function Table() {
                 </div>
             </div>
 
+        </div>
+    );
+}
+
+function ReplayPanel({
+    event,
+    index,
+    total,
+    onClose,
+    onPrev,
+    onNext,
+    onChangeIndex,
+}: {
+    event: ReplayEvent;
+    index: number;
+    total: number;
+    onClose: () => void;
+    onPrev: () => void;
+    onNext: () => void;
+    onChangeIndex: (index: number) => void;
+}) {
+    const snapshot = event.snapshot;
+    const advice = event.llmAdvice || [];
+
+    return (
+        <div className="fixed inset-0 z-[80] flex items-center justify-center bg-black/70 p-4">
+            <div className="w-full max-w-5xl max-h-[90vh] overflow-hidden rounded-lg border border-emerald-700 bg-[#101914] text-white shadow-2xl">
+                <div className="flex items-center justify-between gap-4 border-b border-emerald-900 px-4 py-3">
+                    <div>
+                        <div className="text-lg font-bold">Replay</div>
+                        <div className="text-xs text-gray-400">
+                            {index + 1} / {total} · {event.type} · {event.message}
+                        </div>
+                    </div>
+                    <button onClick={onClose} className="rounded bg-gray-700 px-3 py-1 text-sm hover:bg-gray-600">
+                        Close
+                    </button>
+                </div>
+
+                <div className="border-b border-emerald-900 px-4 py-3">
+                    <div className="flex items-center gap-3">
+                        <button
+                            onClick={onPrev}
+                            disabled={index === 0}
+                            className="rounded bg-emerald-700 px-3 py-1 text-sm disabled:opacity-40"
+                        >
+                            Prev
+                        </button>
+                        <input
+                            type="range"
+                            min={0}
+                            max={Math.max(0, total - 1)}
+                            value={index}
+                            onChange={(event) => onChangeIndex(Number(event.target.value))}
+                            className="flex-1"
+                        />
+                        <button
+                            onClick={onNext}
+                            disabled={index >= total - 1}
+                            className="rounded bg-emerald-700 px-3 py-1 text-sm disabled:opacity-40"
+                        >
+                            Next
+                        </button>
+                    </div>
+                </div>
+
+                <div className="grid max-h-[70vh] grid-cols-1 gap-4 overflow-y-auto p-4 lg:grid-cols-[1.4fr_1fr]">
+                    <div className="space-y-3">
+                        <div className="rounded border border-gray-700 bg-black/30 p-3 text-sm">
+                            <div className="grid grid-cols-2 gap-2 md:grid-cols-4">
+                                <div>Phase: {snapshot.phase}</div>
+                                <div>Turn: Player {snapshot.currentTurn}</div>
+                                <div>Wall: {snapshot.wallCount}</div>
+                                <div>Winner: {snapshot.winner ?? "none"}</div>
+                            </div>
+                            <div className="mt-2">
+                                Last discard: {snapshot.lastDiscard ? formatTile(snapshot.lastDiscard) : "none"}
+                            </div>
+                        </div>
+
+                        <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
+                            {snapshot.players.map((player) => (
+                                <div key={player.id} className="rounded border border-gray-700 bg-black/30 p-3">
+                                    <div className="mb-2 flex items-center justify-between text-sm font-bold">
+                                        <span>Player {player.id} · {player.name}</span>
+                                        <span className={snapshot.currentTurn === player.id ? "text-yellow-300" : "text-gray-400"}>
+                                            {snapshot.currentTurn === player.id ? "turn" : player.wind}
+                                        </span>
+                                    </div>
+                                    <div className="text-xs text-gray-300">
+                                        Hand: {player.hand.map(formatTile).join(" ") || "empty"}
+                                    </div>
+                                    <div className="mt-1 text-xs text-gray-300">
+                                        Discards: {player.discards.map(formatTile).join(" ") || "none"}
+                                    </div>
+                                    <div className="mt-1 text-xs text-gray-300">
+                                        Melds: {player.melds.map((meld) => `${meld.type}(${meld.tiles.map(formatTile).join(" ")})`).join(" · ") || "none"}
+                                    </div>
+                                </div>
+                            ))}
+                        </div>
+                    </div>
+
+                    <div className="space-y-3">
+                        <div className="rounded border border-amber-700/70 bg-black/30 p-3">
+                            <div className="mb-2 text-sm font-bold text-amber-300">LLM Advice Timeline</div>
+                            {advice.length === 0 ? (
+                                <div className="text-xs text-gray-400">No LLM advice recorded yet.</div>
+                            ) : (
+                                <div className="space-y-2">
+                                    {advice.slice().reverse().map((entry) => (
+                                        <div key={`${entry.timestamp}-${entry.playerIndex}-${entry.mode}`} className="border-b border-gray-800 pb-2 last:border-0">
+                                            <div className="flex justify-between gap-2 text-xs text-gray-300">
+                                                <span>P{entry.playerIndex} / {entry.mode}</span>
+                                                <span className={entry.fallback ? "text-red-300" : "text-green-300"}>{entry.result}</span>
+                                            </div>
+                                            <div className="mt-1 whitespace-pre-wrap text-xs leading-snug text-gray-100">{entry.analysis}</div>
+                                        </div>
+                                    ))}
+                                </div>
+                            )}
+                        </div>
+
+                        <div className="rounded border border-gray-700 bg-black/30 p-3">
+                            <div className="mb-2 text-sm font-bold">Recent Logs</div>
+                            <div className="max-h-48 overflow-y-auto text-xs text-gray-300">
+                                {snapshot.logs.slice(-12).reverse().map((log, logIndex) => (
+                                    <div key={`${logIndex}-${log}`} className="border-b border-gray-800 py-1 last:border-0">
+                                        {log}
+                                    </div>
+                                ))}
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
         </div>
     );
 }

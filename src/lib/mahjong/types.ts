@@ -14,6 +14,7 @@ export interface Tile {
 }
 
 export type MeldType = "chi" | "peng" | "gang";
+export type MahjongActionDecision = "chi" | "peng" | "gang" | "hu" | "pass";
 
 export interface Meld {
     type: MeldType;
@@ -40,6 +41,59 @@ export interface GameRules {
     hasSeasons: boolean;
     hasRedDora: boolean; // Riichi specific
     handSize: 13 | 16; // 16 for Taiwan style, usually 13
+}
+
+export interface DebugScriptStep {
+    playerIndex: number;
+    phase?: "DISCARD" | "RESOLVE";
+    action?: MahjongActionDecision;
+    tile?: string;
+    note?: string;
+}
+
+export interface DebugScenario {
+    name: string;
+    hands: Partial<Record<number, string[]>>;
+    draws?: string[];
+    script?: DebugScriptStep[];
+    currentTurn?: number;
+}
+
+export interface LlmAdviceRecord {
+    playerIndex: number;
+    mode: "discard" | "action" | "advice";
+    result: string;
+    analysis: string;
+    fallback?: boolean;
+    timestamp: number;
+}
+
+export interface ReplayEvent {
+    id: string;
+    type: "init" | "draw" | "discard" | "check" | "action" | "resolve" | "win" | "debug" | "llm";
+    message: string;
+    timestamp: number;
+    playerIndex?: number;
+    tile?: Tile;
+    action?: MahjongActionDecision | string;
+    snapshot: {
+        players: Player[];
+        deck: Tile[];
+        currentTurn: number;
+        winner: number | null;
+        lastDiscard: Tile | null;
+        isGameOver: boolean;
+        isWaitingForAction: boolean;
+        pendingActions: GameState["pendingActions"];
+        actionDecisions: GameState["actionDecisions"];
+        wallCount: number;
+        rules: GameRules;
+        actionTimer: number;
+        logs: string[];
+        phase: GameState["phase"];
+        checkIndex: number;
+    };
+    llmAdvice?: LlmAdviceRecord[];
 }
 
 export interface RuleStrategy {
@@ -79,4 +133,8 @@ export interface GameState {
     // Step-by-step debugging state
     phase: "DRAW" | "DISCARD" | "CHECK" | "RESOLVE";
     checkIndex: number; // Player index being checked
+    debugScenario?: DebugScenario;
+    debugScriptIndex?: number;
+    replayEvents: ReplayEvent[];
+    llmAdvice: LlmAdviceRecord[];
 }

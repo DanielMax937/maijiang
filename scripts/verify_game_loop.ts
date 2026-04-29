@@ -6,7 +6,7 @@ import { GameState } from "../src/lib/mahjong/types";
 console.log("Starting Game Loop Verification...");
 
 // 1. Initialize Game
-let gameState = initializeGame("chinese_classical");
+let gameState = initializeGame("chinese");
 console.log(`[INIT] Phase: ${gameState.phase}, Turn: ${gameState.currentTurn}`);
 
 // 2. Simulate Player 3 (Left) Discarding
