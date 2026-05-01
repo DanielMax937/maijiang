@@ -2,7 +2,9 @@
 
 import React, { useEffect, useState, useRef } from "react";
 import { DebugScenario, GameState, Region, ReplayEvent } from "@/lib/mahjong/types";
-import { initializeGame, drawTile, discardTile, recordLlmAdvice, resolvePendingActions, stepGame } from "@/lib/mahjong/game";
+import { initializeGame, drawTile, discardTile, recordLlmAdvice, recordAction, resolvePendingActions, stepGame } from "@/lib/mahjong/game";
+import { createRuleSet } from "@/lib/mahjong/rules";
+import { createGameContext } from "@/lib/mahjong/rules/context";
 import { Hand } from "./Hand";
 import { DiscardPile } from "./DiscardPile";
 import { TurnIndicator } from "./TurnIndicator";
@@ -10,11 +12,16 @@ import { ActionButtons } from "./ActionButtons";
 import { MeldDisplay } from "./MeldDisplay";
 import { GameOverScreen } from "./GameOverScreen";
 import { GameInfo } from "./GameInfo";
+import { GameLog } from "./GameLog";
+import { GameReview } from "./GameReview";
+import { DiceAnimation } from "./DiceAnimation";
+import { CaishenReveal } from "./CaishenReveal";
+import { CaishenDisplay } from "./CaishenDisplay";
 import { cn } from "@/lib/utils";
-import { getStrategy } from "@/lib/mahjong/rules";
 import { chooseBotDiscard, decideBotAction } from "@/lib/mahjong/botAI";
 import { MahjongAction, requestMahjongAI } from "@/lib/mahjong/llmAI";
 import { DEBUG_SCENARIOS, formatTile } from "@/lib/mahjong/debug";
+import { playSound } from "@/lib/sounds";
 
 interface TableProps {
     region?: Region;
@@ -42,6 +49,18 @@ export function Table({ region: initialRegion = "chinese" }: TableProps) {
     const [debugError, setDebugError] = useState<string | null>(null);
     const [showReplay, setShowReplay] = useState(false);
     const [replayIndex, setReplayIndex] = useState(0);
+    const [tenpaiTileIds, setTenpaiTileIds] = useState<Set<string>>(new Set());
+    const [showGameLog, setShowGameLog] = useState(false);
+    const [llmAnalysis, setLlmAnalysis] = useState<string | null>(null);
+    const [isLlmLoading, setIsLlmLoading] = useState(false);
+    const [llmAnalysisKey, setLlmAnalysisKey] = useState<string>("");
+    const [deferredAnalysisMode, setDeferredAnalysisMode] = useState(false);
+    const [showReview, setShowReview] = useState(false);
+
+    // Shengzhou game start ceremony states
+    const [showDiceAnimation, setShowDiceAnimation] = useState(false);
+    const [showCaishenReveal, setShowCaishenReveal] = useState(false);
+    const [ceremonyComplete, setCeremonyComplete] = useState(false);
 
     // Refs to avoid stale closures in async loops
     const isPausedRef = useRef(isPaused);
@@ -85,6 +104,35 @@ export function Table({ region: initialRegion = "chinese" }: TableProps) {
         llmInFlightRef.current = true;
         setThinkingPlayer(playerIndex);
 
+        // In deferred mode, skip LLM and use rule-based AI
+        if (deferredAnalysisMode) {
+            addLlmDebugEntry({
+                playerIndex,
+                mode: "discard",
+                result: `deferred discard ${fallbackTileId}`,
+                analysis: "延迟分析模式：使用规则 AI",
+                fallback: true,
+            });
+            setGameState((current) => {
+                if (!current || current.isGameOver || current.phase !== "DISCARD" || current.currentTurn !== playerIndex) {
+                    return current;
+                }
+                // Record action
+                const tile = current.players[playerIndex].hand.find(t => t.id === fallbackTileId);
+                const withAction = recordAction(current, {
+                    playerIndex,
+                    action: "discard",
+                    tile,
+                    llmAnalysis: "延迟分析模式：使用规则 AI",
+                    isLlmFallback: true,
+                });
+                return discardTile(withAction, fallbackTileId);
+            });
+            llmInFlightRef.current = false;
+            setThinkingPlayer(null);
+            return;
+        }
+
         try {
             const response = await requestMahjongAI({
                 mode: "discard",
@@ -111,7 +159,16 @@ export function Table({ region: initialRegion = "chinese" }: TableProps) {
                 if (!current || current.isGameOver || current.phase !== "DISCARD" || current.currentTurn !== playerIndex) {
                     return current;
                 }
-                return discardTile(current, discardTileId);
+                // Record action with LLM analysis
+                const tile = current.players[playerIndex].hand.find(t => t.id === discardTileId);
+                const withAction = recordAction(current, {
+                    playerIndex,
+                    action: "discard",
+                    tile,
+                    llmAnalysis: response.analysis,
+                    isLlmFallback: response.fallback,
+                });
+                return discardTile(withAction, discardTileId);
             });
         } catch (err) {
             const message = err instanceof Error ? err.message : "Unknown LLM error";
@@ -133,7 +190,16 @@ export function Table({ region: initialRegion = "chinese" }: TableProps) {
                 if (!current || current.isGameOver || current.phase !== "DISCARD" || current.currentTurn !== playerIndex) {
                     return current;
                 }
-                return discardTile(current, fallbackTileId);
+                // Record action with fallback
+                const tile = current.players[playerIndex].hand.find(t => t.id === fallbackTileId);
+                const withAction = recordAction(current, {
+                    playerIndex,
+                    action: "discard",
+                    tile,
+                    llmAnalysis: `LLM 决策失败，使用规则 AI。原因：${message}`,
+                    isLlmFallback: true,
+                });
+                return discardTile(withAction, fallbackTileId);
             });
         } finally {
             llmInFlightRef.current = false;
@@ -154,6 +220,18 @@ export function Table({ region: initialRegion = "chinese" }: TableProps) {
         const decisions = await Promise.all(pendingBotPlayers.map(async (playerIndex) => {
             const pending = state.pendingActions[playerIndex];
             const fallbackAction = decideBotAction(state, playerIndex, pending);
+
+            // In deferred mode, skip LLM and use rule-based AI
+            if (deferredAnalysisMode) {
+                addLlmDebugEntry({
+                    playerIndex,
+                    mode: "action",
+                    result: `deferred ${fallbackAction}`,
+                    analysis: "延迟分析模式：使用规则 AI",
+                    fallback: true,
+                });
+                return [playerIndex, fallbackAction, "延迟分析模式：使用规则 AI", true] as const;
+            }
 
             try {
                 const response = await requestMahjongAI({
@@ -177,24 +255,25 @@ export function Table({ region: initialRegion = "chinese" }: TableProps) {
                     analysis: response.analysis,
                     fallback: response.fallback,
                 });
-                return [playerIndex, action] as const;
+                return [playerIndex, action, response.analysis, response.fallback] as const;
             } catch (err) {
                 const message = err instanceof Error ? err.message : "Unknown LLM error";
+                const analysis = `LLM 决策失败，使用规则 AI。原因：${message}`;
                 addLlmDebugEntry({
                     playerIndex,
                     mode: "action",
                     result: `fallback ${fallbackAction}`,
-                    analysis: `LLM 决策失败，使用规则 AI。原因：${message}`,
+                    analysis,
                     fallback: true,
                 });
                 recordAdviceOnCurrentState({
                     playerIndex,
                     mode: "action",
                     result: `fallback ${fallbackAction}`,
-                    analysis: `LLM 决策失败，使用规则 AI。原因：${message}`,
+                    analysis,
                     fallback: true,
                 });
-                return [playerIndex, fallbackAction] as const;
+                return [playerIndex, fallbackAction, analysis, true] as const;
             }
         }));
 
@@ -202,14 +281,22 @@ export function Table({ region: initialRegion = "chinese" }: TableProps) {
             if (!current || current.isGameOver || current.phase !== "RESOLVE") return current;
             const actionDecisions = { ...current.actionDecisions };
             let logs = [...current.logs];
+            let stateWithActions = current;
 
-            decisions.forEach(([playerIndex, action]) => {
+            decisions.forEach(([playerIndex, action, analysis, isFallback]) => {
                 if (!current.pendingActions[playerIndex] || actionDecisions[playerIndex]) return;
                 actionDecisions[playerIndex] = action;
                 logs = [...logs, action !== "pass" ? `Bot ${playerIndex} chooses ${action.toUpperCase()}` : `Bot ${playerIndex} passes`];
+                // Record action
+                stateWithActions = recordAction(stateWithActions, {
+                    playerIndex,
+                    action: action as any,
+                    llmAnalysis: analysis,
+                    isLlmFallback: isFallback,
+                });
             });
 
-            return resolvePendingActions({ ...current, actionDecisions, logs });
+            return resolvePendingActions({ ...stateWithActions, actionDecisions, logs });
         });
 
         llmInFlightRef.current = false;
@@ -266,17 +353,37 @@ export function Table({ region: initialRegion = "chinese" }: TableProps) {
             const initialGame = initializeGame(region);
             setGameState(initialGame);
             setLlmDebugEntries([]);
+            // Trigger Shengzhou ceremony
+            if (region === "shengzhou") {
+                setShowDiceAnimation(true);
+                setCeremonyComplete(false);
+            } else {
+                setCeremonyComplete(true);
+            }
         } catch (err) {
             console.error("Failed to initialize game:", err);
             setError(err instanceof Error ? err.message : "Unknown error");
         }
     }, [region]);
 
+    // Keyboard shortcut to toggle dev mode (Ctrl+Shift+D)
+    useEffect(() => {
+        const handleKeyDown = (e: KeyboardEvent) => {
+            if (e.ctrlKey && e.shiftKey && e.key === 'D') {
+                e.preventDefault();
+                setIsDevMode(prev => !prev);
+            }
+        };
+        window.addEventListener('keydown', handleKeyDown);
+        return () => window.removeEventListener('keydown', handleKeyDown);
+    }, []);
+
     // Central Game Loop driven by stepGame
     useEffect(() => {
         if (!gameState || gameState.isGameOver || !mounted) return;
         if (isPaused) return; // Pause Check
         if (isAdvancedDebug) return;
+        if (!ceremonyComplete) return; // Wait for Shengzhou ceremony
 
         // If autoPause is ON, we don't run the interval. User clicks "Next" manually.
         if (autoPause) return;
@@ -326,7 +433,89 @@ export function Table({ region: initialRegion = "chinese" }: TableProps) {
         }, 1000); // 1 second per step for visibility
 
         return () => clearInterval(timer);
-    }, [gameState?.isGameOver, isPaused, autoPause, mounted, isAdvancedDebug]);
+    }, [gameState?.isGameOver, isPaused, autoPause, mounted, isAdvancedDebug, ceremonyComplete]);
+
+    // Play game over sound
+    useEffect(() => {
+        if (gameState?.isGameOver) {
+            playSound("gameOver");
+        }
+    }, [gameState?.isGameOver]);
+
+    // Compute tenpai tiles for human player
+    useEffect(() => {
+        if (!gameState || gameState.currentTurn !== 0 || gameState.phase !== "DISCARD") {
+            setTenpaiTileIds(new Set());
+            return;
+        }
+
+        const playerHand = gameState.players[0].hand;
+        // Only compute when player has 14 tiles (drawn tile included)
+        if (playerHand.length % 3 !== 2) {
+            setTenpaiTileIds(new Set());
+            return;
+        }
+
+        const ruleSet = createRuleSet(gameState.rules.region);
+        const tenpaiIds = new Set<string>();
+
+        for (let i = 0; i < playerHand.length; i++) {
+            const remainingHand = playerHand.filter((_, idx) => idx !== i);
+            const tenpaiTiles = ruleSet.huRule.getTenpaiTiles(remainingHand, gameState.caishenTile);
+            if (tenpaiTiles.length > 0) {
+                tenpaiIds.add(playerHand[i].id);
+            }
+        }
+
+        setTenpaiTileIds(tenpaiIds);
+    }, [gameState?.currentTurn, gameState?.phase, gameState?.players[0]?.hand]);
+
+    // LLM Analysis for human player
+    useEffect(() => {
+        if (!gameState || gameState.isGameOver || gameState.currentTurn !== 0) {
+            setLlmAnalysis(null);
+            setIsLlmLoading(false);
+            return;
+        }
+
+        // Only call LLM when it's the player's turn to act
+        const isDiscardPhase = gameState.phase === "DISCARD";
+        const isResolvePhase = gameState.phase === "RESOLVE" && gameState.pendingActions[0];
+
+        if (!isDiscardPhase && !isResolvePhase) {
+            setLlmAnalysis(null);
+            setIsLlmLoading(false);
+            return;
+        }
+
+        // Create a key to avoid duplicate requests
+        const handKey = gameState.players[0].hand.map(t => t.id).sort().join(",");
+        const actionKey = `${gameState.phase}-${gameState.currentTurn}-${handKey}`;
+        if (actionKey === llmAnalysisKey) return;
+
+        const fetchAnalysis = async () => {
+            setIsLlmLoading(true);
+            setLlmAnalysisKey(actionKey);
+
+            try {
+                const availableActions = isResolvePhase ? gameState.pendingActions[0] : undefined;
+                const response = await requestMahjongAI({
+                    mode: "advice",
+                    gameState,
+                    playerIndex: 0,
+                    availableActions,
+                });
+                setLlmAnalysis(response.analysis);
+            } catch (err) {
+                const message = err instanceof Error ? err.message : "Unknown error";
+                setLlmAnalysis(`分析失败: ${message}`);
+            } finally {
+                setIsLlmLoading(false);
+            }
+        };
+
+        void fetchAnalysis();
+    }, [gameState?.currentTurn, gameState?.phase, gameState?.players[0]?.hand, gameState?.pendingActions, llmAnalysisKey]);
 
     const findScriptTileId = (state: GameState, playerIndex: number, requestedTile?: string) => {
         const hand = state.players[playerIndex]?.hand || [];
@@ -439,6 +628,12 @@ export function Table({ region: initialRegion = "chinese" }: TableProps) {
                 }
 
                 if (prev.actionTimer <= 0) return prev; // Timer stays at 0 if not waiting (or handle turn timeout)
+
+                // Play timer sound when running low (under 5 seconds)
+                if (prev.actionTimer <= 5 && prev.actionTimer > 0 && prev.isWaitingForAction) {
+                    playSound("timer");
+                }
+
                 return { ...prev, actionTimer: prev.actionTimer - 1 };
             });
         }, 1000);
@@ -450,15 +645,29 @@ export function Table({ region: initialRegion = "chinese" }: TableProps) {
         if (!gameState) return;
         if (gameState.isWaitingForAction) return; // Can't discard while waiting
         if (gameState.currentTurn !== 0) return;
+        if (isLlmLoading) return; // Wait for LLM analysis
+
+        // Record action
+        const tile = gameState.players[0].hand.find(t => t.id === tileId);
+        let newState = recordAction(gameState, {
+            playerIndex: 0,
+            action: "discard",
+            tile,
+            llmAnalysis: llmAnalysis || undefined,
+        });
 
         // Discard logic
-        const newState = discardTile(gameState, tileId);
-        setGameState(newState);
+        newState = discardTile(newState, tileId);
+        // Reset selfDrawPassed flag when discarding
+        setGameState({ ...newState, selfDrawPassed: false });
+        setLlmAnalysis(null); // Clear analysis after action
+        playSound("tileDiscard");
     };
 
     // Auto-draw for Player 0
     useEffect(() => {
         if (!gameState || gameState.isGameOver || gameState.isWaitingForAction || isPaused) return;
+        if (!ceremonyComplete) return; // Wait for Shengzhou ceremony
         if (gameState.currentTurn === 0 && gameState.players[0].hand.length % 3 === 1) {
             // Needs to draw
             // Add small delay
@@ -494,20 +703,23 @@ export function Table({ region: initialRegion = "chinese" }: TableProps) {
         }
 
         // Self-draw actions (Gang/Hu) during own turn
-        const strategy = getStrategy(gameState.rules.region);
+        const ruleSet = createRuleSet(gameState.rules.region);
         const player = gameState.players[playerIndex];
         const hand = player.hand;
         const isMyTurn = gameState.currentTurn === playerIndex;
         const hasFullHand = hand.length % 3 === 2;
         const isSelfDraw = isMyTurn && hasFullHand;
 
-        if (isSelfDraw) {
+        if (isSelfDraw && !gameState.selfDrawPassed) {
+            const ctx = createGameContext(gameState, playerIndex, { isSelfDraw: true });
+            const canGang = ruleSet.gangRule.canGang(ctx);
+            const huResult = ruleSet.huRule.canHu(ctx);
             return {
                 chi: false,
                 peng: false,
-                gang: strategy.canGang(hand, null, true),
-                hu: strategy.canHu(hand, null, true),
-                pass: false
+                gang: canGang,
+                hu: huResult.success,
+                pass: canGang || huResult.success // Show pass button if any action is available
             };
         }
 
@@ -516,7 +728,120 @@ export function Table({ region: initialRegion = "chinese" }: TableProps) {
 
     const handleAction = (action: string, playerIndex: number = 0) => {
         if (!gameState) return;
+        if (isLlmLoading) return; // Wait for LLM analysis
         console.log(`Player ${playerIndex} chose ${action}`);
+
+        // Handle self-draw actions (during DISCARD phase, player's own turn)
+        if (gameState.phase === "DISCARD" && gameState.currentTurn === playerIndex) {
+            if (action === "hu") {
+                // Self-draw Hu (Tsumo)
+                const ruleSet = createRuleSet(gameState.rules.region);
+                const ctx = createGameContext(gameState, playerIndex, { isSelfDraw: true });
+                const huResult = ruleSet.huRule.canHu(ctx);
+                const scoreResult = ruleSet.scoreRule.calculate(ctx, huResult);
+                // Apply score changes inline
+                const newPlayers = gameState.players.map(p => ({ ...p }));
+                const perPlayer = Math.floor(scoreResult.total / 3);
+                newPlayers.forEach((p, i) => {
+                    if (i === playerIndex) p.score += scoreResult.total;
+                    else p.score -= perPlayer;
+                });
+                playSound("tileHu");
+                setGameState({
+                    ...gameState,
+                    players: newPlayers,
+                    winner: playerIndex,
+                    isGameOver: true,
+                    scoreResult,
+                    logs: [...gameState.logs, `Player ${playerIndex} wins with self-draw Hu! Score: ${scoreResult.total}`],
+                });
+                return;
+            }
+            if (action === "gang") {
+                // Self-draw Gang (An Gang or Jia Gang)
+                const ruleSet = createRuleSet(gameState.rules.region);
+                const player = gameState.players[playerIndex];
+                const hand = player.hand;
+                const ctx = createGameContext(gameState, playerIndex, { isSelfDraw: true });
+
+                // Check for An Gang (4 identical tiles in hand)
+                const gangTile = ruleSet.gangRule.getSelfDrawGangTile?.(ctx) || hand.find(t => {
+                    const count = hand.filter(h => h.suit === t.suit && h.rank === t.rank).length;
+                    return count === 4;
+                });
+
+                if (gangTile) {
+                    // Perform An Gang
+                    playSound("tileGang");
+                    const newMeld = {
+                        type: "gang" as const,
+                        tiles: hand.filter(t => t.suit === gangTile.suit && t.rank === gangTile.rank),
+                    };
+                    const newHand = hand.filter(t => !(t.suit === gangTile.suit && t.rank === gangTile.rank));
+                    const newPlayers = [...gameState.players];
+                    newPlayers[playerIndex] = {
+                        ...newPlayers[playerIndex],
+                        hand: newHand,
+                        melds: [...newPlayers[playerIndex].melds, newMeld],
+                    };
+                    // Draw replacement tile after An Gang
+                    const newState = drawTile({
+                        ...gameState,
+                        players: newPlayers,
+                        logs: [...gameState.logs, `Player ${playerIndex} performs An Gang (Concealed Kong)`],
+                    }, true);
+                    setGameState(newState);
+                    return;
+                }
+
+                // Check for Jia Gang (add to existing Peng)
+                const pengMeld = player.melds.find(m => m.type === "peng");
+                if (pengMeld) {
+                    const jiaGangTile = hand.find(t => t.suit === pengMeld.tiles[0].suit && t.rank === pengMeld.tiles[0].rank);
+                    if (jiaGangTile) {
+                        // Perform Jia Gang
+                        const newHand = hand.filter(t => t.id !== jiaGangTile.id);
+                        const newMelds = player.melds.map(m => {
+                            if (m.type === "peng" && m.tiles[0].suit === pengMeld.tiles[0].suit && m.tiles[0].rank === pengMeld.tiles[0].rank) {
+                                return { ...m, type: "gang" as const, tiles: [...m.tiles, jiaGangTile] };
+                            }
+                            return m;
+                        });
+                        const newPlayers = [...gameState.players];
+                        newPlayers[playerIndex] = {
+                            ...newPlayers[playerIndex],
+                            hand: newHand,
+                            melds: newMelds,
+                        };
+                        const newState = drawTile({
+                            ...gameState,
+                            players: newPlayers,
+                            logs: [...gameState.logs, `Player ${playerIndex} performs Jia Gang (Add Kong)`],
+                        }, true);
+                        setGameState(newState);
+                        return;
+                    }
+                }
+                return;
+            }
+            if (action === "pass") {
+                // Pass on self-draw actions, let player discard normally
+                setGameState({
+                    ...gameState,
+                    selfDrawPassed: true,
+                    actionDecisions: {},
+                    pendingActions: {},
+                });
+                return;
+            }
+        }
+
+        // Handle actions during RESOLVE phase (from other players' discards)
+        // Play sound for the action
+        if (action === "hu") playSound("tileHu");
+        else if (action === "gang") playSound("tileGang");
+        else if (action === "peng") playSound("tilePeng");
+        else if (action === "chi") playSound("tileChi");
 
         // 1. Record Decision
         const newDecisions = { ...gameState.actionDecisions, [playerIndex]: action };
@@ -591,6 +916,12 @@ export function Table({ region: initialRegion = "chinese" }: TableProps) {
         setIsAdvancedDebug(false);
         setDebugError(null);
         setReplayIndex(0);
+        // Trigger Shengzhou ceremony for new game
+        if (region === "shengzhou") {
+            setShowDiceAnimation(true);
+            setShowCaishenReveal(false);
+            setCeremonyComplete(false);
+        }
     };
 
     useEffect(() => {
@@ -623,15 +954,103 @@ export function Table({ region: initialRegion = "chinese" }: TableProps) {
 
     return (
         <div className="flex flex-col items-center justify-center min-h-screen bg-[#0f2912] relative overflow-hidden">
+            {/* Shengzhou Dice Animation */}
+            {showDiceAnimation && gameState?.diceValues && (
+                <DiceAnimation
+                    diceValues={gameState.diceValues}
+                    onComplete={() => {
+                        setShowDiceAnimation(false);
+                        if (gameState?.caishenSourceTile && gameState?.caishenTile) {
+                            setShowCaishenReveal(true);
+                        } else {
+                            setCeremonyComplete(true);
+                        }
+                    }}
+                />
+            )}
+
+            {/* Shengzhou Caishen Reveal */}
+            {showCaishenReveal && gameState?.caishenSourceTile && gameState?.caishenTile && (
+                <CaishenReveal
+                    sourceTile={gameState.caishenSourceTile}
+                    caishenTile={gameState.caishenTile}
+                    onComplete={() => {
+                        setShowCaishenReveal(false);
+                        setCeremonyComplete(true);
+                    }}
+                />
+            )}
+
+            {/* Persistent Caishen Display for Shengzhou */}
+            {gameState?.caishenTile && ceremonyComplete && !gameState.isGameOver && (
+                <CaishenDisplay
+                    caishenTile={gameState.caishenTile}
+                    sourceTile={gameState.caishenSourceTile}
+                    className="fixed top-4 left-1/2 transform -translate-x-1/2 z-50"
+                />
+            )}
+
             {/* Game Over Screen */}
-            {gameState.isGameOver && (
+            {gameState.isGameOver && !showReview && (
                 <GameOverScreen
                     winner={gameState.winner}
                     isDrawGame={gameState.winner === null && gameState.deck.length === 0}
-                    onNewGame={handleNewGame}
+                    scoreResult={gameState.scoreResult}
+                    onNewGame={() => { handleNewGame(); playSound("tileClick"); }}
+                    onReview={() => setShowReview(true)}
                 />
             )}
-            {/* Dev Mode Toggle */}
+
+            {/* Game Review */}
+            {showReview && (
+                <GameReview
+                    actions={gameState.actionHistory}
+                    onClose={() => setShowReview(false)}
+                    deferredAnalysisMode={deferredAnalysisMode}
+                />
+            )}
+
+            {/* Game Log */}
+            <GameLog
+                actions={gameState.actionHistory}
+                isVisible={showGameLog}
+                showLlmAnalysis={isLlmDebug}
+                onClose={() => setShowGameLog(false)}
+                onToggleAnalysis={() => setIsLlmDebug(!isLlmDebug)}
+            />
+            {/* Top Controls */}
+            <div className="fixed top-4 left-4 z-50 flex items-center gap-2">
+                <button
+                    onClick={() => { handleNewGame(); playSound("tileClick"); }}
+                    className="px-3 py-1.5 bg-amber-600 hover:bg-amber-500 text-white text-sm font-bold rounded-lg shadow-lg transition-colors"
+                >
+                    New Game
+                </button>
+                <button
+                    onClick={() => setShowGameLog(!showGameLog)}
+                    className={cn(
+                        "px-3 py-1.5 text-sm font-bold rounded-lg shadow-lg transition-colors",
+                        showGameLog
+                            ? "bg-green-600 text-white"
+                            : "bg-stone-700 text-stone-300 hover:bg-stone-600"
+                    )}
+                >
+                    Log
+                </button>
+                <button
+                    onClick={() => setDeferredAnalysisMode(!deferredAnalysisMode)}
+                    className={cn(
+                        "px-3 py-1.5 text-sm font-bold rounded-lg shadow-lg transition-colors",
+                        deferredAnalysisMode
+                            ? "bg-purple-600 text-white"
+                            : "bg-stone-700 text-stone-300 hover:bg-stone-600"
+                    )}
+                >
+                    {deferredAnalysisMode ? "Deferred: ON" : "Deferred: OFF"}
+                </button>
+            </div>
+
+            {/* Dev Mode Toggle - Hidden by default, toggle with keyboard shortcut */}
             <div className="fixed top-4 right-4 z-50 bg-black/50 p-2 rounded text-white flex flex-col gap-2 items-end">
                 <label className="text-sm font-bold cursor-pointer flex items-center gap-2">
                     <input
@@ -793,6 +1212,7 @@ export function Table({ region: initialRegion = "chinese" }: TableProps) {
                     wallCount={gameState.wallCount}
                     currentTurn={gameState.currentTurn}
                     playerWinds={gameState.players.map(p => p.wind)}
+                    playerScores={gameState.players.map(p => p.score)}
                 />
 
                 {/* Discard Piles & Turn Indicators */}
@@ -817,7 +1237,7 @@ export function Table({ region: initialRegion = "chinese" }: TableProps) {
 
                 {/* Player 0 (Bottom/You) */}
                 <div className="absolute bottom-4 left-1/2 transform -translate-x-1/2 flex flex-col items-center gap-2">
-                    <TurnIndicator isActive={gameState.currentTurn === 0} />
+                    <TurnIndicator isActive={gameState.currentTurn === 0} isHuman={true} />
                     <DiscardPile tiles={gameState.players[0].discards} />
                 </div>
             </div>
@@ -827,7 +1247,7 @@ export function Table({ region: initialRegion = "chinese" }: TableProps) {
             {/* Top Player (Bot 2) */}
             <div className="fixed top-0 left-0 right-0 h-32 z-10 pointer-events-none">
                 <div className="absolute top-4 left-1/2 transform -translate-x-1/2 rotate-180 pointer-events-auto flex flex-col items-center gap-1">
-                    <Hand tiles={gameState.players[2].hand} isCurrentPlayer={false} faceDown={!isDevMode} />
+                    <Hand tiles={gameState.players[2].hand} isCurrentPlayer={false} faceDown={!isDevMode} caishenTile={gameState.caishenTile} />
                     <div className="rotate-180">
                         <MeldDisplay melds={gameState.players[2].melds} />
                     </div>
@@ -837,7 +1257,7 @@ export function Table({ region: initialRegion = "chinese" }: TableProps) {
             {/* Left Player (Bot 3) */}
             <div className="fixed left-0 top-0 bottom-0 w-32 z-10 pointer-events-none">
                 <div className="absolute left-4 top-1/2 transform -translate-y-1/2 rotate-90 pointer-events-auto flex flex-col items-center gap-1">
-                    <Hand tiles={gameState.players[3].hand} isCurrentPlayer={false} faceDown={!isDevMode} />
+                    <Hand tiles={gameState.players[3].hand} isCurrentPlayer={false} faceDown={!isDevMode} caishenTile={gameState.caishenTile} />
                     <div className="-rotate-90">
                         <MeldDisplay melds={gameState.players[3].melds} />
                     </div>
@@ -847,7 +1267,7 @@ export function Table({ region: initialRegion = "chinese" }: TableProps) {
             {/* Right Player (Bot 1) */}
             <div className="fixed right-0 top-0 bottom-0 w-32 z-10 pointer-events-none">
                 <div className="absolute right-4 top-1/2 transform -translate-y-1/2 -rotate-90 pointer-events-auto flex flex-col items-center gap-1">
-                    <Hand tiles={gameState.players[1].hand} isCurrentPlayer={false} faceDown={!isDevMode} />
+                    <Hand tiles={gameState.players[1].hand} isCurrentPlayer={false} faceDown={!isDevMode} caishenTile={gameState.caishenTile} />
                     <div className="rotate-90">
                         <MeldDisplay melds={gameState.players[1].melds} />
                     </div>
@@ -863,6 +1283,7 @@ export function Table({ region: initialRegion = "chinese" }: TableProps) {
                             availableActions={getAvailableActions(0)}
                             onAction={(action: string) => handleAction(action, 0)}
                             timer={gameState.actionTimer}
+                            disabled={isLlmLoading}
                         />
                     </div>
                     <div className="flex items-end gap-2">
@@ -871,8 +1292,45 @@ export function Table({ region: initialRegion = "chinese" }: TableProps) {
                             tiles={player.hand}
                             isCurrentPlayer={gameState.currentTurn === 0}
                             onTileClick={handleTileClick}
+                            tenpaiTileIds={tenpaiTileIds}
+                            disabled={isLlmLoading}
+                            caishenTile={gameState.caishenTile}
                         />
                     </div>
+
+                    {/* LLM Analysis Display */}
+                    {(isLlmLoading || llmAnalysis) && (
+                        <div className={cn(
+                            "mt-2 px-4 py-2 rounded-lg max-w-2xl text-sm",
+                            isLlmLoading
+                                ? "bg-blue-900/60 text-blue-200 border border-blue-700"
+                                : "bg-stone-800/80 text-stone-200 border border-stone-600"
+                        )}>
+                            <div className="flex items-center gap-2 mb-1">
+                                <span className="text-xs font-bold text-amber-400">AI 分析</span>
+                                {isLlmLoading && (
+                                    <span className="text-xs text-blue-300 animate-pulse">分析中...</span>
+                                )}
+                            </div>
+                            {isLlmLoading ? (
+                                <div className="flex items-center gap-2">
+                                    <div className="w-4 h-4 border-2 border-blue-400 border-t-transparent rounded-full animate-spin" />
+                                    <span className="text-xs">正在分析牌局...</span>
+                                </div>
+                            ) : (
+                                <p className="text-xs leading-relaxed">{llmAnalysis}</p>
+                            )}
+                        </div>
+                    )}
+
+                    {/* Loading overlay when LLM is analyzing */}
+                    {isLlmLoading && gameState.currentTurn === 0 && (
+                        <div className="absolute inset-0 bg-black/20 flex items-center justify-center pointer-events-none">
+                            <div className="bg-blue-900/80 px-4 py-2 rounded-lg text-blue-200 text-sm font-bold">
+                                AI 分析中，请稍候...
+                            </div>
+                        </div>
+                    )}
                 </div>
             </div>
 

@@ -1,14 +1,17 @@
 import React from "react";
 import { cn } from "@/lib/utils";
+import { ScoreResult } from "@/lib/mahjong/types";
 
 interface GameOverScreenProps {
     winner: number | null;
     isDrawGame: boolean;
+    scoreResult?: ScoreResult;
     onNewGame: () => void;
+    onReview: () => void;
     className?: string;
 }
 
-export function GameOverScreen({ winner, isDrawGame, onNewGame, className }: GameOverScreenProps) {
+export function GameOverScreen({ winner, isDrawGame, scoreResult, onNewGame, onReview, className }: GameOverScreenProps) {
     const isHumanWinner = winner === 0;
 
     return (
@@ -39,7 +42,29 @@ export function GameOverScreen({ winner, isDrawGame, onNewGame, className }: Gam
                             : `Bot ${winner} wins with Hu!`}
                 </p>
 
-                {/* Stats placeholder */}
+                {/* Score Display */}
+                {scoreResult && !isDrawGame && (
+                    <div className="bg-black/30 rounded-lg p-4 mb-4">
+                        <div className="text-amber-400 text-2xl font-bold mb-2">
+                            {scoreResult.total} points
+                        </div>
+                        <div className="text-stone-400 text-sm mb-2">
+                            Base: {scoreResult.base} × 2<sup>{scoreResult.fan}</sup> fan
+                        </div>
+                        {scoreResult.breakdown.length > 0 && (
+                            <div className="text-left text-xs text-stone-500 space-y-1">
+                                {scoreResult.breakdown.map((item, i) => (
+                                    <div key={i} className="flex items-center gap-1">
+                                        <span className="text-amber-500">•</span>
+                                        <span>{item}</span>
+                                    </div>
+                                ))}
+                            </div>
+                        )}
+                    </div>
+                )}
+
+                {/* Stats */}
                 <div className="bg-black/30 rounded-lg p-4 mb-6">
                     <div className="grid grid-cols-2 gap-4 text-sm">
                         <div>
@@ -57,13 +82,21 @@ export function GameOverScreen({ winner, isDrawGame, onNewGame, className }: Gam
                     </div>
                 </div>
 
-                {/* New Game Button */}
-                <button
-                    onClick={onNewGame}
-                    className="w-full py-3 px-6 bg-gradient-to-r from-amber-500 to-orange-600 hover:from-amber-400 hover:to-orange-500 text-white font-bold rounded-lg transition-all transform hover:scale-105 shadow-lg"
-                >
-                    New Game
-                </button>
+                {/* Buttons */}
+                <div className="flex flex-col gap-3">
+                    <button
+                        onClick={onReview}
+                        className="w-full py-3 px-6 bg-gradient-to-r from-purple-500 to-indigo-600 hover:from-purple-400 hover:to-indigo-500 text-white font-bold rounded-lg transition-all transform hover:scale-105 shadow-lg"
+                    >
+                        Review Game
+                    </button>
+                    <button
+                        onClick={onNewGame}
+                        className="w-full py-3 px-6 bg-gradient-to-r from-amber-500 to-orange-600 hover:from-amber-400 hover:to-orange-500 text-white font-bold rounded-lg transition-all transform hover:scale-105 shadow-lg"
+                    >
+                        New Game
+                    </button>
+                </div>
             </div>
         </div>
     );

@@ -11,10 +11,11 @@ interface ActionButtonsProps {
     };
     onAction: (action: "chi" | "peng" | "gang" | "hu" | "pass") => void;
     timer: number;
+    disabled?: boolean;
     className?: string;
 }
 
-export function ActionButtons({ availableActions, onAction, timer, className }: ActionButtonsProps) {
+export function ActionButtons({ availableActions, onAction, timer, disabled = false, className }: ActionButtonsProps) {
     // Only show if there are any available actions
     const hasAnyAction = availableActions.chi || availableActions.peng || availableActions.gang || availableActions.hu || availableActions.pass;
 
@@ -22,13 +23,16 @@ export function ActionButtons({ availableActions, onAction, timer, className }: 
 
     return (
         <div className={cn("flex flex-col items-center gap-1", className)}>
-            <div className="flex items-center gap-2 bg-black/60 p-2 rounded backdrop-blur-sm">
+            <div className={cn(
+                "flex items-center gap-2 p-2 rounded backdrop-blur-sm transition-opacity",
+                disabled ? "bg-black/40 opacity-50" : "bg-black/60"
+            )}>
                 <button
                     onClick={() => onAction("chi")}
-                    disabled={!availableActions.chi}
+                    disabled={!availableActions.chi || disabled}
                     className={cn(
                         "px-3 py-1 text-xs rounded font-bold transition-colors",
-                        availableActions.chi
+                        availableActions.chi && !disabled
                             ? "bg-blue-600 text-white hover:bg-blue-500"
                             : "bg-gray-600 text-gray-400 cursor-not-allowed"
                     )}
@@ -37,10 +41,10 @@ export function ActionButtons({ availableActions, onAction, timer, className }: 
                 </button>
                 <button
                     onClick={() => onAction("peng")}
-                    disabled={!availableActions.peng}
+                    disabled={!availableActions.peng || disabled}
                     className={cn(
                         "px-3 py-1 text-xs rounded font-bold transition-colors",
-                        availableActions.peng
+                        availableActions.peng && !disabled
                             ? "bg-blue-600 text-white hover:bg-blue-500"
                             : "bg-gray-600 text-gray-400 cursor-not-allowed"
                     )}
@@ -49,10 +53,10 @@ export function ActionButtons({ availableActions, onAction, timer, className }: 
                 </button>
                 <button
                     onClick={() => onAction("gang")}
-                    disabled={!availableActions.gang}
+                    disabled={!availableActions.gang || disabled}
                     className={cn(
                         "px-3 py-1 text-xs rounded font-bold transition-colors",
-                        availableActions.gang
+                        availableActions.gang && !disabled
                             ? "bg-blue-600 text-white hover:bg-blue-500"
                             : "bg-gray-600 text-gray-400 cursor-not-allowed"
                     )}
@@ -61,10 +65,10 @@ export function ActionButtons({ availableActions, onAction, timer, className }: 
                 </button>
                 <button
                     onClick={() => onAction("hu")}
-                    disabled={!availableActions.hu}
+                    disabled={!availableActions.hu || disabled}
                     className={cn(
                         "px-3 py-1 text-xs rounded font-bold transition-colors",
-                        availableActions.hu
+                        availableActions.hu && !disabled
                             ? "bg-red-600 text-white hover:bg-red-500"
                             : "bg-gray-600 text-gray-400 cursor-not-allowed"
                     )}
@@ -76,7 +80,13 @@ export function ActionButtons({ availableActions, onAction, timer, className }: 
                 {availableActions.pass && (
                     <button
                         onClick={() => onAction("pass")}
-                        className="px-3 py-1 text-xs rounded font-bold transition-colors bg-stone-600 text-white hover:bg-stone-500"
+                        disabled={disabled}
+                        className={cn(
+                            "px-3 py-1 text-xs rounded font-bold transition-colors",
+                            disabled
+                                ? "bg-gray-600 text-gray-400 cursor-not-allowed"
+                                : "bg-stone-600 text-white hover:bg-stone-500"
+                        )}
                     >
                         Pass
                     </button>

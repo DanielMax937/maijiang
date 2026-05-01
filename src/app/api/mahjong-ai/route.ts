@@ -111,6 +111,28 @@ ${discardTimeline(gameState)}
 }`;
     }
 
+    if (mode === "analyze") {
+        const actualAction = request.actualAction || "unknown";
+        const actualTile = request.actualTile || "";
+        return `${base}
+任务: 分析 Player ${playerIndex} 的一步操作。
+实际执行的操作: ${actualAction} ${actualTile}
+
+请分析:
+1. 这个操作是否正确？
+2. 如果不正确，应该做什么？
+3. 这个操作的优点和缺点是什么？
+
+返回格式:
+{
+  "analysis": "中文详细分析",
+  "recommended": "推荐的操作是什么",
+  "pros": ["优点1", "优点2"],
+  "cons": ["缺点1", "缺点2"],
+  "score": 0到100的质量评分
+}`;
+    }
+
     return `${base}
 任务: 你现在是 Player 0（人类玩家）的助手。分析 Player 0 当前牌型、大家已经打出的牌和顺序，并给出下一步建议。
 如果当前可操作，合法动作是: ${legalActions.join(", ") || "无特殊动作，可考虑弃牌"}
@@ -144,14 +166,15 @@ function validateResponse(request: MahjongAIRequest, raw: unknown): MahjongAIRes
         throw new Error("LLM selected a tile that is not in hand");
     }
 
-    if (request.mode === "action" || response.action) {
+    // Only validate action for "action" mode, not "advice" mode
+    if (request.mode === "action" && response.action) {
         const allowed = new Set<MahjongAction>(
             Object.entries(request.availableActions || {})
                 .filter(([, enabled]) => enabled)
                 .map(([action]) => action as MahjongAction)
         );
-        if (request.mode === "action") allowed.add("pass");
-        if (response.action && !allowed.has(response.action)) {
+        allowed.add("pass");
+        if (!allowed.has(response.action)) {
             throw new Error("LLM selected an illegal action");
         }
     }
@@ -161,6 +184,10 @@ function validateResponse(request: MahjongAIRequest, raw: unknown): MahjongAIRes
         discardTileId: response.discardTileId,
         analysis: response.analysis,
         confidence: typeof response.confidence === "number" ? response.confidence : undefined,
+        recommended: response.recommended,
+        pros: response.pros,
+        cons: response.cons,
+        score: typeof response.score === "number" ? response.score : undefined,
     };
 }
 

@@ -8,27 +8,37 @@ interface HandProps {
     isCurrentPlayer: boolean;
     onTileClick?: (tileId: string) => void;
     faceDown?: boolean;
+    tenpaiTileIds?: Set<string>;
+    disabled?: boolean;
     className?: string;
+    caishenTile?: TileType;
 }
 
-export function Hand({ tiles, isCurrentPlayer, onTileClick, faceDown, className }: HandProps) {
+export function Hand({ tiles, isCurrentPlayer, onTileClick, faceDown, tenpaiTileIds, disabled = false, className, caishenTile }: HandProps) {
     const [selectedTileId, setSelectedTileId] = React.useState<string | null>(null);
 
+    const isCaishen = (tile: TileType) => {
+        if (!caishenTile) return false;
+        return tile.suit === caishenTile.suit && tile.rank === caishenTile.rank;
+    };
+
     return (
-        <div className={cn("flex flex-row gap-1 justify-center", className)}>
+        <div className={cn("flex flex-row gap-1 justify-center", disabled && "opacity-50 pointer-events-none", className)}>
             {tiles.map((tile, index) => (
                 <Tile
                     key={`${tile.id}-${index}`}
                     tile={tile}
                     faceDown={faceDown}
                     selected={selectedTileId === tile.id}
+                    isTenpai={tenpaiTileIds?.has(tile.id)}
+                    isCaishen={isCaishen(tile)}
                     onClick={() => {
-                        if (isCurrentPlayer && onTileClick) {
+                        if (isCurrentPlayer && onTileClick && !disabled) {
                             setSelectedTileId(tile.id);
                             onTileClick(tile.id);
                         }
                     }}
-                    className={isCurrentPlayer ? "hover:z-10" : ""}
+                    className={isCurrentPlayer && !disabled ? "hover:z-10" : ""}
                 />
             ))}
         </div>

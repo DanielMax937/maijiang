@@ -1,6 +1,6 @@
 import { GameState } from "./types";
 
-export type MahjongAIMode = "discard" | "action" | "advice";
+export type MahjongAIMode = "discard" | "action" | "advice" | "analyze";
 export type MahjongAction = "chi" | "peng" | "gang" | "hu" | "pass";
 
 export interface MahjongAIRequest {
@@ -8,6 +8,8 @@ export interface MahjongAIRequest {
     gameState: GameState;
     playerIndex: number;
     availableActions?: Partial<Record<MahjongAction, boolean>>;
+    actualAction?: string; // For analyze mode: what was actually done
+    actualTile?: string;   // For analyze mode: tile that was discarded
 }
 
 export interface MahjongAIResponse {
@@ -16,6 +18,11 @@ export interface MahjongAIResponse {
     analysis: string;
     confidence?: number;
     fallback?: boolean;
+    // For analyze mode
+    recommended?: string;
+    pros?: string[];
+    cons?: string[];
+    score?: number;
 }
 
 export async function requestMahjongAI(request: MahjongAIRequest): Promise<MahjongAIResponse> {

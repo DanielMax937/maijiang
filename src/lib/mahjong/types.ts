@@ -33,7 +33,7 @@ export interface Player {
     wind: "east" | "south" | "west" | "north";
 }
 
-export type Region = "chinese" | "riichi" | "sichuan" | "beijing";
+export type Region = "chinese" | "hangzhou" | "shengzhou";
 
 export interface GameRules {
     region: Region;
@@ -92,6 +92,9 @@ export interface ReplayEvent {
         logs: string[];
         phase: GameState["phase"];
         checkIndex: number;
+        caishenTile?: Tile;
+        caishenSourceTile?: Tile;
+        diceValues?: [number, number];
     };
     llmAdvice?: LlmAdviceRecord[];
 }
@@ -103,7 +106,99 @@ export interface RuleStrategy {
     canPeng(hand: Tile[], discard: Tile): boolean;
     canGang(hand: Tile[], discard: Tile | null, isSelfDraw: boolean): boolean;
     canHu(hand: Tile[], discard: Tile | null, isSelfDraw: boolean): boolean;
-    // Future: getValidMelds, getScore, etc.
+    getTenpaiTiles(hand: Tile[]): Tile[];
+}
+
+// ===== New Strategy Pattern Architecture =====
+
+// Game context for rule decisions
+export interface GameContext {
+    hand: Tile[];
+    discard?: Tile;
+    isSelfDraw: boolean;
+    melds: Meld[];
+    allPlayers: Player[];
+    rules: GameRules;
+    phase: string;
+    currentTurn: number;
+    playerIndex: number;
+    caishenTile?: Tile; // Shengzhou: the wildcard tile type
+    isGangDraw?: boolean; // Whether this draw was from a gang (杠上开花)
+}
+
+// Hu result
+export interface HuResult {
+    success: boolean;
+    patterns: string[];
+}
+
+// Sub-rule interfaces
+export interface ChiRule {
+    canChi(ctx: GameContext): boolean;
+}
+
+export interface PengRule {
+    canPeng(ctx: GameContext): boolean;
+}
+
+export interface GangRule {
+    canGang(ctx: GameContext): boolean;
+    getSelfDrawGangTile?(ctx: GameContext): Tile | null;
+}
+
+export interface HuRule {
+    canHu(ctx: GameContext): HuResult;
+    checkWin(hand: Tile[]): boolean;
+    getTenpaiTiles(hand: Tile[], caishenTile?: Tile): Tile[];
+}
+
+export interface ScoreRule {
+    calculate(ctx: GameContext, huResult: HuResult): ScoreResult;
+}
+
+export interface DrawRule {
+    shouldReplaceFlower(tile: Tile): boolean;
+}
+
+// Composable rule set
+export interface MahjongRuleSet {
+    config: GameRules;
+    chiRule: ChiRule;
+    pengRule: PengRule;
+    gangRule: GangRule;
+    huRule: HuRule;
+    scoreRule: ScoreRule;
+    drawRule: DrawRule;
+}
+
+export interface ScoreResult {
+    base: number;
+    fan: number;
+    total: number;
+    breakdown: string[];
+}
+
+// Game action record for review mode
+export interface GameActionRecord {
+    id: string;
+    sequenceNumber: number;
+    playerIndex: number;
+    action: "draw" | "discard" | "chi" | "peng" | "gang" | "hu" | "pass" | "tsumo_gang" | "jia_gang";
+    tile?: Tile;
+    timestamp: number;
+    gameStateSnapshot: ReplayEvent["snapshot"]; // Full snapshot at this point
+    llmAnalysis?: string; // LLM analysis for this action
+    isLlmFallback?: boolean; // Whether LLM fallback was used
+    deferredAnalysis?: DeferredAnalysis; // Filled in during review
+}
+
+// Deferred analysis result for review mode
+export interface DeferredAnalysis {
+    recommended: string; // What should have been done
+    actual: string;      // What was actually done
+    pros: string[];      // Advantages of the actual move
+    cons: string[];      // Disadvantages of the actual move
+    score?: number;      // Quality score 0-100
 }
 
 export interface GameState {
@@ -113,6 +208,8 @@ export interface GameState {
     winner: number | null;
     lastDiscard: Tile | null;
     isGameOver: boolean;
+    scoreResult?: ScoreResult;
+    selfDrawPassed?: boolean; // Track if player passed on self-draw actions
     // New fields for turn interrupt logic
     isWaitingForAction: boolean;
     pendingActions: {
@@ -137,4 +234,10 @@ export interface GameState {
     debugScriptIndex?: number;
     replayEvents: ReplayEvent[];
     llmAdvice: LlmAdviceRecord[];
+    actionHistory: GameActionRecord[]; // All actions for review
+    // Shengzhou Mahjong specific
+    caishenTile?: Tile; // The wildcard/joker tile type (e.g., 6万 if flipped 5万)
+    caishenSourceTile?: Tile; // The tile that was flipped to determine caishen
+    diceValues?: [number, number]; // Dice roll values for game start ceremony
+    dealerIndex?: number; // Dealer (庄家) index
 }

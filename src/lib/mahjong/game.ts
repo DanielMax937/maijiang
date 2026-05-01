@@ -1,7 +1,7 @@
-import { DebugScenario, GameState, LlmAdviceRecord, Player, ReplayEvent, Tile, Region, GameRules } from "./types";
+import { DebugScenario, GameState, GameActionRecord, LlmAdviceRecord, Player, ReplayEvent, Tile, Region, GameRules, MahjongRuleSet } from "./types";
 import { generateDeck, shuffleDeck } from "./deck";
-import { getStrategy } from "./rules";
-import { chooseBotDiscard, decideBotAction } from "./botAI";
+import { createRuleSet } from "./rules";
+import { createGameContext } from "./rules/context";
 import { buildDebugGamePieces, sortTiles, validateDebugScenario } from "./debug";
 
 function createReplaySnapshot(gameState: GameState): ReplayEvent["snapshot"] {
@@ -26,6 +26,9 @@ function createReplaySnapshot(gameState: GameState): ReplayEvent["snapshot"] {
         logs: [...gameState.logs],
         phase: gameState.phase,
         checkIndex: gameState.checkIndex,
+        caishenTile: gameState.caishenTile,
+        caishenSourceTile: gameState.caishenSourceTile,
+        diceValues: gameState.diceValues,
     };
 }
 
@@ -62,26 +65,80 @@ export function recordLlmAdvice(gameState: GameState, advice: Omit<LlmAdviceReco
     });
 }
 
-export function getRules(region: Region): GameRules {
-    switch (region) {
-        case "riichi":
-            return { region, hasFlowers: false, hasSeasons: false, hasRedDora: true, handSize: 13 };
-        case "sichuan":
-            return { region, hasFlowers: false, hasSeasons: false, hasRedDora: false, handSize: 13 };
-        case "chinese":
-        default:
-            return { region, hasFlowers: true, hasSeasons: true, hasRedDora: false, handSize: 13 };
+export function recordAction(
+    gameState: GameState,
+    action: Omit<GameActionRecord, "id" | "sequenceNumber" | "timestamp" | "gameStateSnapshot">
+): GameState {
+    const record: GameActionRecord = {
+        ...action,
+        id: `${Date.now()}-${Math.random().toString(36).slice(2)}`,
+        sequenceNumber: gameState.actionHistory.length,
+        timestamp: Date.now(),
+        gameStateSnapshot: createReplaySnapshot(gameState),
+    };
+    return {
+        ...gameState,
+        actionHistory: [...gameState.actionHistory, record],
+    };
+}
+
+// Apply score changes to players
+function applyScoreChanges(
+    players: Player[],
+    winnerIndex: number,
+    loserIndex: number | null,
+    score: number
+): Player[] {
+    const newPlayers = players.map(p => ({ ...p }));
+
+    if (loserIndex !== null) {
+        newPlayers[winnerIndex].score += score;
+        newPlayers[loserIndex].score -= score;
+    } else {
+        const perPlayer = Math.floor(score / 3);
+        newPlayers.forEach((p, i) => {
+            if (i === winnerIndex) {
+                p.score += score;
+            } else {
+                p.score -= perPlayer;
+            }
+        });
     }
+
+    return newPlayers;
+}
+
+// Determine the caishen (wildcard) tile by finding the "next" tile
+function getNextTile(tile: Tile): { suit: Tile["suit"]; rank: Tile["rank"] } {
+    if (tile.suit === "bamboo" || tile.suit === "character" || tile.suit === "dot") {
+        const rank = tile.rank as number;
+        return { suit: tile.suit, rank: (rank % 9 + 1) as Tile["rank"] };
+    }
+    if (tile.suit === "wind") {
+        const windOrder = ["east", "south", "west", "north"];
+        const idx = windOrder.indexOf(tile.rank as string);
+        return { suit: "wind", rank: windOrder[(idx + 1) % 4] as Tile["rank"] };
+    }
+    if (tile.suit === "dragon") {
+        const dragonOrder = ["red", "green", "white"];
+        const idx = dragonOrder.indexOf(tile.rank as string);
+        return { suit: "dragon", rank: dragonOrder[(idx + 1) % 3] as Tile["rank"] };
+    }
+    return { suit: tile.suit, rank: tile.rank };
 }
 
 export function initializeGame(region: Region = "chinese", debugScenario?: DebugScenario): GameState {
-    const strategy = getStrategy(region);
-    const rules = strategy.getRules();
+    const ruleSet = createRuleSet(region);
+    const rules = ruleSet.config;
     const deck = shuffleDeck(generateDeck(rules));
     const players: Player[] = [];
     const winds: Player["wind"][] = ["east", "south", "west", "north"];
 
-    // Initialize 4 players
+    // Roll dice for dealer determination
+    const dice1 = Math.floor(Math.random() * 6) + 1;
+    const dice2 = Math.floor(Math.random() * 6) + 1;
+    const dealerIndex = region === "shengzhou" ? (dice1 + dice2) % 4 : 0;
+
     for (let i = 0; i < 4; i++) {
         players.push({
             id: i,
@@ -89,9 +146,9 @@ export function initializeGame(region: Region = "chinese", debugScenario?: Debug
             hand: [],
             discards: [],
             melds: [],
-            isTurn: i === 0, // Player 0 starts
+            isTurn: i === dealerIndex,
             score: 25000,
-            wind: winds[i],
+            wind: winds[(i - dealerIndex + 4) % 4],
         });
     }
 
@@ -102,8 +159,6 @@ export function initializeGame(region: Region = "chinese", debugScenario?: Debug
         players.splice(0, players.length, ...debugPieces.players);
         gameDeck = debugPieces.deck;
     } else {
-        // Deal tiles (based on handSize)
-        // Usually handSize is 13, dealer gets 14th later
         for (let i = 0; i < rules.handSize; i++) {
             players.forEach((player) => {
                 const tile = gameDeck.pop();
@@ -115,33 +170,56 @@ export function initializeGame(region: Region = "chinese", debugScenario?: Debug
             player.hand = sortTiles(player.hand);
         });
 
-        // Dealer (Player 0) draws extra tile
+        // Dealer gets 14th tile
         const firstTile = gameDeck.pop();
         if (firstTile) {
-            players[0].hand.push(firstTile);
+            players[dealerIndex].hand.push(firstTile);
         }
     }
 
+    // Shengzhou: determine caishen (wildcard) tile
+    let caishenTile: Tile | undefined;
+    let caishenSourceTile: Tile | undefined;
+    if (region === "shengzhou" && !debugScenario) {
+        // Flip a tile from the wall to determine caishen
+        const flippedTile = gameDeck.pop();
+        if (flippedTile) {
+            caishenSourceTile = flippedTile;
+            const nextTileInfo = getNextTile(flippedTile);
+            caishenTile = {
+                id: `caishen-indicator`,
+                suit: nextTileInfo.suit,
+                rank: nextTileInfo.rank,
+            };
+        }
+    }
+
+    const startTurn = debugScenario?.currentTurn ?? dealerIndex;
     const initialState: GameState = {
         players,
         deck: gameDeck,
-        currentTurn: debugScenario?.currentTurn ?? 0,
+        currentTurn: startTurn,
         winner: null,
         lastDiscard: null,
         isGameOver: false,
         wallCount: gameDeck.length,
         rules,
-        actionTimer: 20,
+        actionTimer: 30,
         isWaitingForAction: false,
         pendingActions: {},
         actionDecisions: {},
         logs: ["Game initialized"],
-        phase: players[debugScenario?.currentTurn ?? 0].hand.length % 3 === 2 ? "DISCARD" : "DRAW",
+        phase: players[startTurn].hand.length % 3 === 2 ? "DISCARD" : "DRAW",
         checkIndex: 0,
         debugScenario,
         debugScriptIndex: 0,
         replayEvents: [],
         llmAdvice: [],
+        actionHistory: [],
+        caishenTile,
+        caishenSourceTile,
+        diceValues: [dice1, dice2] as [number, number],
+        dealerIndex,
     };
 
     return appendReplayEvent(initialState, {
@@ -159,19 +237,17 @@ export function drawTile(gameState: GameState, fromDeadWall: boolean = false): G
     }
 
     const newDeck = [...gameState.deck];
-    // For dead wall (kong replacement), draw from the beginning; otherwise from end
     const tile = fromDeadWall ? newDeck.shift() : newDeck.pop();
 
     if (!tile) return gameState;
 
-    // Check if it's a flower or season tile
-    const isFlowerOrSeason = tile.suit === "flower" || tile.suit === "season";
+    const ruleSet = createRuleSet(gameState.rules.region);
 
-    if (isFlowerOrSeason && gameState.rules.hasFlowers) {
-        // Move flower/season to melds as a special revealed tile
+    // Check if it's a flower or season tile that should be replaced
+    if (ruleSet.drawRule.shouldReplaceFlower(tile) && gameState.rules.hasFlowers) {
         const currentPlayer = gameState.players[gameState.currentTurn];
         const newMelds = [...currentPlayer.melds, {
-            type: "gang" as const, // Use gang type to show it's revealed
+            type: "gang" as const,
             tiles: [tile],
         }];
 
@@ -184,14 +260,13 @@ export function drawTile(gameState: GameState, fromDeadWall: boolean = false): G
 
         const logMsg = `Player ${gameState.currentTurn} drew ${tile.suit} tile and draws replacement`;
 
-        // Recursively draw replacement tile
         return drawTile({
             ...gameState,
             deck: newDeck,
             players: newPlayers,
             wallCount: newDeck.length,
             logs: [...gameState.logs, logMsg],
-        }, true); // Draw from dead wall for replacement
+        }, true);
     }
 
     const newPlayers = gameState.players.map((p, i) => {
@@ -209,7 +284,7 @@ export function drawTile(gameState: GameState, fromDeadWall: boolean = false): G
         players: newPlayers,
         wallCount: newDeck.length,
         logs: [...gameState.logs, logMsg],
-        phase: "DISCARD", // After drawing, move to discard phase
+        phase: "DISCARD",
     }, {
         type: "draw",
         playerIndex: gameState.currentTurn,
@@ -218,31 +293,30 @@ export function drawTile(gameState: GameState, fromDeadWall: boolean = false): G
     });
 }
 
-// Draw from dead wall (for Kong replacement)
 export function drawFromDeadWall(gameState: GameState): GameState {
     return drawTile(gameState, true);
 }
 
 // Helper to check if any player has actions on the discarded tile
 function checkActionsOnDiscard(gameState: GameState, discard: Tile, discarderIndex: number): { pendingActions: GameState["pendingActions"], logs: string[] } {
-    const strategy = getStrategy(gameState.rules.region);
+    const ruleSet = createRuleSet(gameState.rules.region);
     const pendingActions: GameState["pendingActions"] = {};
     const newLogs: string[] = [];
     let hasAction = false;
 
     gameState.players.forEach((player, index) => {
-        if (index === discarderIndex) return; // Discarder can't act on own discard
+        if (index === discarderIndex) return;
 
-        const hand = player.hand;
         const isNextPlayer = index === (discarderIndex + 1) % 4;
+        const ctx = createGameContext(gameState, index, { discard });
 
-        // Log the check
         newLogs.push(`Player ${index} checking actions for ${discard.suit} ${discard.rank}...`);
 
-        const canChi = isNextPlayer && strategy.canChi(hand, discard);
-        const canPeng = strategy.canPeng(hand, discard);
-        const canGang = strategy.canGang(hand, discard, false);
-        const canHu = strategy.canHu(hand, discard, false);
+        const canChi = isNextPlayer && ruleSet.chiRule.canChi(ctx);
+        const canPeng = ruleSet.pengRule.canPeng(ctx);
+        const canGang = ruleSet.gangRule.canGang(ctx);
+        const huResult = ruleSet.huRule.canHu(ctx);
+        const canHu = huResult.success;
 
         if (canChi) newLogs.push(`  - Player ${index} can Chi`);
         if (canPeng) newLogs.push(`  - Player ${index} can Peng`);
@@ -274,7 +348,6 @@ export function discardTile(gameState: GameState, tileId: string): GameState {
     const newHand = [...currentPlayer.hand];
     newHand.splice(tileIndex, 1);
 
-    // Sort hand after discard
     newHand.sort((a, b) => {
         if (a.suit !== b.suit) return a.suit.localeCompare(b.suit);
         if (typeof a.rank === "number" && typeof b.rank === "number") {
@@ -290,15 +363,14 @@ export function discardTile(gameState: GameState, tileId: string): GameState {
         discards: [...currentPlayer.discards, tile],
     };
 
-    // Check for actions from other players
     const tempState = {
         ...gameState,
         players: newPlayers,
         lastDiscard: tile,
         logs: [...gameState.logs, `Player ${currentPlayerIndex} discarded ${tile.suit} ${tile.rank}`],
         phase: "CHECK" as const,
-        checkIndex: (currentPlayerIndex + 1) % 4, // Start checking from next player
-        pendingActions: {}, // Clear previous pending actions
+        checkIndex: (currentPlayerIndex + 1) % 4,
+        pendingActions: {},
     };
 
     return appendReplayEvent(tempState, {
@@ -309,12 +381,12 @@ export function discardTile(gameState: GameState, tileId: string): GameState {
     });
 }
 
-// New function to check a single player for actions
+// Check a single player for actions
 export function performCheck(gameState: GameState): GameState {
     if (gameState.phase !== "CHECK") return gameState;
 
     const { checkIndex, lastDiscard, currentTurn } = gameState;
-    if (!lastDiscard) return gameState; // Should not happen in CHECK phase
+    if (!lastDiscard) return gameState;
 
     // If we looped back to the discarder, checking is done
     if (checkIndex === currentTurn) {
@@ -324,14 +396,13 @@ export function performCheck(gameState: GameState): GameState {
                 ...gameState,
                 phase: "RESOLVE",
                 isWaitingForAction: true,
-                actionTimer: 20,
+                actionTimer: 30,
                 logs: [...gameState.logs, "Checks complete. Waiting for actions..."],
             }, {
                 type: "check",
                 message: "Checks complete. Waiting for actions.",
             });
         } else {
-            // No actions found, next turn
             return appendReplayEvent({
                 ...gameState,
                 phase: "DRAW",
@@ -345,16 +416,18 @@ export function performCheck(gameState: GameState): GameState {
     }
 
     const player = gameState.players[checkIndex];
-    const strategy = getStrategy(gameState.rules.region);
+    const ruleSet = createRuleSet(gameState.rules.region);
+    const ctx = createGameContext(gameState, checkIndex, { discard: lastDiscard });
     const newLogs = [...gameState.logs];
 
     newLogs.push(`Player ${checkIndex} checking actions for ${lastDiscard.suit} ${lastDiscard.rank}...`);
 
     const isNextPlayer = checkIndex === (currentTurn + 1) % 4;
-    const canChi = isNextPlayer && strategy.canChi(player.hand, lastDiscard);
-    const canPeng = strategy.canPeng(player.hand, lastDiscard);
-    const canGang = strategy.canGang(player.hand, lastDiscard, false);
-    const canHu = strategy.canHu(player.hand, lastDiscard, false);
+    const canChi = isNextPlayer && ruleSet.chiRule.canChi(ctx);
+    const canPeng = ruleSet.pengRule.canPeng(ctx);
+    const canGang = ruleSet.gangRule.canGang(ctx);
+    const huResult = ruleSet.huRule.canHu(ctx);
+    const canHu = huResult.success;
 
     if (canChi) newLogs.push(`  - Player ${checkIndex} can Chi`);
     if (canPeng) newLogs.push(`  - Player ${checkIndex} can Peng`);
@@ -393,13 +466,57 @@ export function stepGame(gameState: GameState): GameState {
             return drawTile(gameState);
 
         case "DISCARD":
-            // If it's a bot's turn, perform discard
+            // For bots: only check instant self-draw actions (hu/gang), then wait for LLM
             if (gameState.currentTurn !== 0) {
                 const botHand = gameState.players[gameState.currentTurn].hand;
                 if (botHand.length > 0) {
-                    // Smart AI: Choose best tile to discard
-                    const discardId = chooseBotDiscard(botHand);
-                    return discardTile(gameState, discardId);
+                    const ruleSet = createRuleSet(gameState.rules.region);
+                    const currentTurn = gameState.currentTurn;
+                    const ctx = createGameContext(gameState, currentTurn, { isSelfDraw: true });
+
+                    // Check self-draw Hu (Tsumo) - instant, no LLM needed
+                    const huResult = ruleSet.huRule.canHu(ctx);
+                    if (huResult.success) {
+                        const scoreResult = ruleSet.scoreRule.calculate(ctx, huResult);
+                        const newPlayers = applyScoreChanges(gameState.players, currentTurn, null, scoreResult.total);
+                        return appendReplayEvent({
+                            ...gameState,
+                            players: newPlayers,
+                            winner: currentTurn,
+                            isGameOver: true,
+                            scoreResult,
+                            logs: [...gameState.logs, `Bot ${currentTurn} wins with self-draw Hu! Score: ${scoreResult.total}`],
+                        }, {
+                            type: "win",
+                            playerIndex: currentTurn,
+                            action: "hu",
+                            message: `Bot ${currentTurn} wins with self-draw Hu! Score: ${scoreResult.total}`,
+                        });
+                    }
+
+                    // Check self-draw Gang (An Gang) - instant, no LLM needed
+                    const gangTile = ruleSet.gangRule.getSelfDrawGangTile?.(ctx);
+                    if (gangTile) {
+                        const newMeld = {
+                            type: "gang" as const,
+                            tiles: botHand.filter(t => t.suit === gangTile.suit && t.rank === gangTile.rank),
+                        };
+                        const newHand = botHand.filter(t => !(t.suit === gangTile.suit && t.rank === gangTile.rank));
+                        const newPlayers = [...gameState.players];
+                        newPlayers[currentTurn] = {
+                            ...newPlayers[currentTurn],
+                            hand: newHand,
+                            melds: [...newPlayers[currentTurn].melds, newMeld],
+                        };
+                        return drawTile({
+                            ...gameState,
+                            players: newPlayers,
+                            logs: [...gameState.logs, `Bot ${currentTurn} performs An Gang (Concealed Kong)`],
+                        }, true);
+                    }
+
+                    // No instant actions - wait for LLM to decide discard
+                    return gameState;
                 }
             }
             // If human turn, we wait for UI interaction (handleTileClick calls discardTile)
@@ -409,34 +526,9 @@ export function stepGame(gameState: GameState): GameState {
             return performCheck(gameState);
 
         case "RESOLVE":
-            // If bots need to decide, make them pass (for now)
-            // This step might need to be called multiple times if we want to simulate "thinking"
-            // But for "step" logic, we can just force pass undecided bots
-            const pendingPlayers = Object.keys(gameState.pendingActions).map(Number);
-            const newState = { ...gameState };
-            let changed = false;
-
-            pendingPlayers.forEach(pIdx => {
-                if (pIdx !== 0 && !newState.actionDecisions[pIdx]) {
-                    // Smart AI: Decide what action to take
-                    const pending = newState.pendingActions[pIdx];
-                    const action = decideBotAction(newState, pIdx, pending);
-                    newState.actionDecisions = { ...newState.actionDecisions, [pIdx]: action };
-                    changed = true;
-                    if (action !== "pass") {
-                        newState.logs = [...newState.logs, `Bot ${pIdx} chooses ${action.toUpperCase()}`];
-                    } else {
-                        newState.logs = [...newState.logs, `Bot ${pIdx} passes`];
-                    }
-                }
-            });
-
-            if (changed) {
-                return resolvePendingActions(newState);
-            }
-
-            // If waiting for human, do nothing
-            return resolvePendingActions(newState); // Will only resolve if all decided
+            // Don't auto-decide for bots - wait for LLM in Table.tsx
+            // Only resolve if all players have decided
+            return resolvePendingActions(gameState);
 
         default:
             return gameState;
@@ -450,23 +542,15 @@ function performAction(gameState: GameState, playerIndex: number, action: string
     let newHand = [...player.hand];
     const newMelds = [...player.melds];
 
-    // Remove discard from discarder's pile (it's being claimed)
-    // We need to find who discarded it. gameState.lastDiscard is just the tile.
-    // But we know the previous turn was the discarder.
-    // Actually, we updated `discards` in `discardTile`. We need to pop it back.
-    // But `gameState.currentTurn` is still the discarder in the waiting state?
-    // In `discardTile`, we returned `tempState` where `currentTurn` was NOT updated yet if waiting.
-    // So `gameState.currentTurn` IS the discarder.
     const discarderIndex = gameState.currentTurn;
     const discarder = gameState.players[discarderIndex];
     const newDiscarderDiscards = [...discarder.discards];
-    newDiscarderDiscards.pop(); // Remove the claimed tile
+    newDiscarderDiscards.pop();
 
     const newPlayers = [...gameState.players];
     newPlayers[discarderIndex] = { ...discarder, discards: newDiscarderDiscards };
 
     if (action === "peng") {
-        // Remove 2 matching tiles
         let removed = 0;
         newHand = newHand.filter(t => {
             if (removed < 2 && t.suit === discard.suit && t.rank === discard.rank) {
@@ -475,9 +559,8 @@ function performAction(gameState: GameState, playerIndex: number, action: string
             }
             return true;
         });
-        newMelds.push({ type: "peng", tiles: [discard, discard, discard] }); // Simplified meld structure
+        newMelds.push({ type: "peng", tiles: [discard, discard, discard] });
     } else if (action === "gang") {
-        // Remove 3 matching tiles
         let removed = 0;
         newHand = newHand.filter(t => {
             if (removed < 3 && t.suit === discard.suit && t.rank === discard.rank) {
@@ -488,16 +571,14 @@ function performAction(gameState: GameState, playerIndex: number, action: string
         });
         newMelds.push({ type: "gang", tiles: [discard, discard, discard, discard] });
     } else if (action === "chi") {
-        // Chi: Take the discard and remove 2 tiles that form a sequence
         if (typeof discard.rank === "number") {
             const rank = discard.rank;
             const suit = discard.suit;
 
-            // Try each possible sequence position
             const sequences: [number, number][] = [
-                [rank - 2, rank - 1], // discard is 3rd
-                [rank - 1, rank + 1], // discard is 2nd
-                [rank + 1, rank + 2], // discard is 1st
+                [rank - 2, rank - 1],
+                [rank - 1, rank + 1],
+                [rank + 1, rank + 2],
             ];
 
             for (const [r1, r2] of sequences) {
@@ -506,12 +587,10 @@ function performAction(gameState: GameState, playerIndex: number, action: string
                 const idx2 = newHand.findIndex((t, i) => i !== idx1 && t.suit === suit && t.rank === r2);
                 if (idx2 === -1) continue;
 
-                // Found valid sequence - remove tiles
                 const tile1 = newHand[idx1];
                 const tile2 = newHand[idx2];
                 newHand = newHand.filter((_, i) => i !== idx1 && i !== idx2);
 
-                // Create meld with actual tiles in order
                 const meldTiles = [tile1, discard, tile2].sort((a, b) => {
                     if (typeof a.rank === "number" && typeof b.rank === "number") {
                         return a.rank - b.rank;
@@ -533,14 +612,14 @@ function performAction(gameState: GameState, playerIndex: number, action: string
     return appendReplayEvent({
         ...gameState,
         players: newPlayers,
-        currentTurn: playerIndex, // Turn moves to actor
+        currentTurn: playerIndex,
         isWaitingForAction: false,
         pendingActions: {},
         actionDecisions: {},
-        actionTimer: 20,
-        lastDiscard: null, // Discard claimed
+        actionTimer: 30,
+        lastDiscard: null,
         logs: [...gameState.logs, `Player ${playerIndex} performed ${action}`],
-        phase: "DISCARD", // Actor must now discard
+        phase: "DISCARD",
     }, {
         type: "action",
         playerIndex,
@@ -554,16 +633,12 @@ export function resolvePendingActions(gameState: GameState): GameState {
     const { pendingActions, actionDecisions } = gameState;
     const pendingPlayers = Object.keys(pendingActions).map(Number);
 
-    // Check if all have decided
     const allDecided = pendingPlayers.every(p => actionDecisions[p] !== undefined);
-    if (!allDecided) return gameState; // Still waiting
+    if (!allDecided) return gameState;
 
-    // Priority: Hu > Gang/Peng > Chi
-    // Filter for those who took an action (not pass)
     const actors = pendingPlayers.filter(p => actionDecisions[p] !== "pass");
 
     if (actors.length === 0) {
-        // All passed
         const nextTurn = (gameState.currentTurn + 1) % 4;
         return appendReplayEvent({
             ...gameState,
@@ -571,16 +646,15 @@ export function resolvePendingActions(gameState: GameState): GameState {
             isWaitingForAction: false,
             pendingActions: {},
             actionDecisions: {},
-            actionTimer: 20,
+            actionTimer: 30,
             logs: [...gameState.logs, "All players passed"],
-            phase: "DRAW", // Next player draws
+            phase: "DRAW",
         }, {
             type: "resolve",
             message: "All players passed",
         });
     }
 
-    // Sort actors by priority
     actors.sort((a, b) => {
         const actionA = actionDecisions[a];
         const actionB = actionDecisions[b];
@@ -589,11 +663,8 @@ export function resolvePendingActions(gameState: GameState): GameState {
         const pA = priority[actionA as keyof typeof priority] || 0;
         const pB = priority[actionB as keyof typeof priority] || 0;
 
-        if (pA !== pB) return pB - pA; // Higher priority first
+        if (pA !== pB) return pB - pA;
 
-        // If same priority (e.g. both Hu), standard rules: closest to discarder (turn order)
-        // Discarder is currentTurn.
-        // Distance = (Actor - Discarder + 4) % 4
         const distA = (a - gameState.currentTurn + 4) % 4;
         const distB = (b - gameState.currentTurn + 4) % 4;
         return distA - distB;
@@ -603,34 +674,40 @@ export function resolvePendingActions(gameState: GameState): GameState {
     const winningAction = actionDecisions[winnerIndex];
 
     if (winningAction === "hu") {
+        const ruleSet = createRuleSet(gameState.rules.region);
+        const ctx = createGameContext(gameState, winnerIndex, { discard: gameState.lastDiscard || undefined });
+        const huResult = ruleSet.huRule.canHu(ctx);
+        const scoreResult = ruleSet.scoreRule.calculate(ctx, huResult);
+        const newPlayers = applyScoreChanges(gameState.players, winnerIndex, gameState.currentTurn, scoreResult.total);
+
         return appendReplayEvent({
             ...gameState,
+            players: newPlayers,
             winner: winnerIndex,
             isGameOver: true,
+            scoreResult,
             isWaitingForAction: false,
             pendingActions: {},
             actionDecisions: {},
-            logs: [...gameState.logs, `Player ${winnerIndex} wins with Hu!`],
+            logs: [...gameState.logs, `Player ${winnerIndex} wins with Hu! Score: ${scoreResult.total}`],
         }, {
             type: "win",
             playerIndex: winnerIndex,
             action: "hu",
-            message: `Player ${winnerIndex} wins with Hu!`,
+            message: `Player ${winnerIndex} wins with Hu! Score: ${scoreResult.total}`,
         });
     }
 
-    // Perform Action (Peng/Gang/Chi)
     return performAction(gameState, winnerIndex, winningAction);
 }
 
 export function checkWin(hand: Tile[], region: Region = "chinese"): boolean {
-    const strategy = getStrategy(region);
-    return strategy.checkWin(hand);
+    const ruleSet = createRuleSet(region);
+    return ruleSet.huRule.checkWin(hand);
 }
 
 // Jia Gang (Add Kong): Promote an existing Peng to a Kong when drawing the 4th tile
 export function canJiaGang(player: Player): Tile | null {
-    // Check if any tile in hand matches an existing Peng meld
     for (const meld of player.melds) {
         if (meld.type === "peng" && meld.tiles.length > 0) {
             const pengTile = meld.tiles[0];
@@ -651,17 +728,14 @@ export function performJiaGang(gameState: GameState, playerIndex: number, tileId
 
     if (!tile) return gameState;
 
-    // Find the matching Peng meld
     const meldIndex = player.melds.findIndex(
         m => m.type === "peng" && m.tiles[0]?.suit === tile.suit && m.tiles[0]?.rank === tile.rank
     );
 
     if (meldIndex === -1) return gameState;
 
-    // Remove tile from hand
     const newHand = player.hand.filter(t => t.id !== tileId);
 
-    // Upgrade Peng to Gang
     const newMelds = [...player.melds];
     newMelds[meldIndex] = {
         type: "gang",
@@ -675,7 +749,6 @@ export function performJiaGang(gameState: GameState, playerIndex: number, tileId
         melds: newMelds
     };
 
-    // After Jia Gang, player draws from dead wall and continues
     return drawTile({
         ...gameState,
         players: newPlayers,

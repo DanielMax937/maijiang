@@ -9,28 +9,22 @@ interface OnboardingProps {
 export function Onboarding({ onSelectRegion }: OnboardingProps) {
     const regions: { id: Region; name: string; desc: string; icon: string }[] = [
         {
+            id: "shengzhou",
+            name: "嵊州麻将",
+            desc: "136张牌，财神（百搭）机制，推倒胡，可点炮，财鸟/飞鸟加番。",
+            icon: "🎲",
+        },
+        {
+            id: "hangzhou",
+            name: "Hangzhou Mahjong",
+            desc: "Standard 136 tiles. No flowers/seasons. Seven Pairs supported.",
+            icon: "🏯",
+        },
+        {
             id: "chinese",
             name: "Chinese Classical",
             desc: "Standard rules with Flowers and Seasons.",
             icon: "🀄",
-        },
-        {
-            id: "riichi",
-            name: "Japanese Riichi",
-            desc: "No flowers, Red Dora, Reach mechanics.",
-            icon: "🌸",
-        },
-        {
-            id: "sichuan",
-            name: "Sichuan Bloody",
-            desc: "Battle to the end. No winds/dragons (simplified here).",
-            icon: "🌶️",
-        },
-        {
-            id: "beijing",
-            name: "Beijing Mahjong",
-            desc: "Classic capital style. No flowers, standard rules.",
-            icon: "🏯",
         },
     ];
 

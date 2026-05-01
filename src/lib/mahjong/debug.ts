@@ -1,5 +1,5 @@
 import { generateDeck } from "./deck";
-import { getStrategy } from "./rules";
+import { createRuleSet } from "./rules";
 import { DebugScenario, GameRules, Player, Rank, Region, Suit, Tile } from "./types";
 
 type TileKey = `${Suit}-${string}`;
@@ -109,8 +109,8 @@ export function validateDebugScenario(region: Region, scenario: DebugScenario): 
         throw new Error("Debug scenario requires hands.");
     }
 
-    const strategy = getStrategy(region);
-    const rules = strategy.getRules();
+    const ruleSet = createRuleSet(region);
+    const rules = ruleSet.config;
     const maxCounts = new Map<TileKey, number>();
     generateDeck(rules).forEach((tile) => {
         const key = tileKey(tile);
