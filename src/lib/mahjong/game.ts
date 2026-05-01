@@ -83,28 +83,106 @@ export function recordAction(
 }
 
 // Apply score changes to players
+// 嵊州麻将结算:
+// - 自摸: 三家各付 score (winnerIndex gains score*3, each loser loses score)
+// - 点炮: 放冲者付 score*2, 其他两家各付 score
+// - 承包: 如果某玩家对胡牌者吃/碰3次以上，该玩家承包：
+//   - 点炮：承包者付3份
+//   - 自摸：承包者付5倍
+// discarderIndex: who discarded the winning tile (null for self-draw)
 function applyScoreChanges(
     players: Player[],
     winnerIndex: number,
-    loserIndex: number | null,
-    score: number
+    discarderIndex: number | null,
+    score: number,
+    liabilityCount?: Record<number, Record<number, number>>
 ): Player[] {
     const newPlayers = players.map(p => ({ ...p }));
 
-    if (loserIndex !== null) {
-        newPlayers[winnerIndex].score += score;
-        newPlayers[loserIndex].score -= score;
-    } else {
-        const perPlayer = Math.floor(score / 3);
-        newPlayers.forEach((p, i) => {
-            if (i === winnerIndex) {
-                p.score += score;
-            } else {
-                p.score -= perPlayer;
+    // Check for liable player: someone who has chi/peng from the winner 3+ times
+    let liablePlayerIndex: number | null = null;
+    if (liabilityCount) {
+        for (let i = 0; i < 4; i++) {
+            if (i === winnerIndex) continue;
+            const claimsFromWinner = liabilityCount[i]?.[winnerIndex] || 0;
+            if (claimsFromWinner >= 3) {
+                liablePlayerIndex = i;
+                break;
             }
-        });
+        }
     }
 
+    if (discarderIndex !== null) {
+        // Dianpao: discarder pays double, others pay single
+        // 承包: liable player pays 3 shares instead of normal
+        let totalGain = 0;
+        newPlayers.forEach((p, i) => {
+            if (i === winnerIndex) return;
+            if (liablePlayerIndex !== null && i === liablePlayerIndex) {
+                // 承包: pays 3 shares
+                const pay = score * 3;
+                p.score -= pay;
+                totalGain += pay;
+            } else if (i === discarderIndex) {
+                const pay = score * 2;
+                p.score -= pay;
+                totalGain += pay;
+            } else {
+                p.score -= score;
+                totalGain += score;
+            }
+        });
+        newPlayers[winnerIndex].score += totalGain;
+    } else {
+        // Zimo: all 3 losers pay equally (score each)
+        // 承包: liable player pays 5 shares instead of 2
+        let totalGain = 0;
+        newPlayers.forEach((p, i) => {
+            if (i === winnerIndex) return;
+            if (liablePlayerIndex !== null && i === liablePlayerIndex) {
+                // 承包: pays 5 shares
+                const pay = score * 5;
+                p.score -= pay;
+                totalGain += pay;
+            } else {
+                p.score -= score;
+                totalGain += score;
+            }
+        });
+        newPlayers[winnerIndex].score += totalGain;
+    }
+
+    return newPlayers;
+}
+
+// 飞鸟赔偿计算: 连续打出财神的人，在该圈内若有人胡，需赔偿
+function calculateFeiniaoCompensation(consecutiveCount: number): { fan: number; name: string; amount: number } {
+    const base = 8;
+    let fan: number;
+    let name: string;
+    if (consecutiveCount <= 0) return { fan: 0, name: "", amount: 0 };
+    if (consecutiveCount === 1) {
+        fan = 5;
+        name = "财鸟";
+    } else {
+        fan = 10 * Math.pow(2, consecutiveCount - 2);
+        const names = ["", "", "飞鸟", "双飞鸟", "三飞鸟", "四飞鸟"];
+        name = names[consecutiveCount] || `${consecutiveCount}飞鸟`;
+    }
+    const amount = base * Math.pow(2, fan);
+    return { fan, name, amount };
+}
+
+// Apply feiniao compensation: discarder pays winner extra
+function applyFeiniaoCompensation(
+    players: Player[],
+    winnerIndex: number,
+    discarderIndex: number,
+    compensation: number
+): Player[] {
+    const newPlayers = players.map(p => ({ ...p }));
+    newPlayers[discarderIndex].score -= compensation;
+    newPlayers[winnerIndex].score += compensation;
     return newPlayers;
 }
 
@@ -127,7 +205,12 @@ function getNextTile(tile: Tile): { suit: Tile["suit"]; rank: Tile["rank"] } {
     return { suit: tile.suit, rank: tile.rank };
 }
 
-export function initializeGame(region: Region = "chinese", debugScenario?: DebugScenario): GameState {
+export function initializeGame(
+    region: Region = "chinese",
+    debugScenario?: DebugScenario,
+    previousDealerIndex?: number,
+    previousDealerStreak?: number
+): GameState {
     const ruleSet = createRuleSet(region);
     const rules = ruleSet.config;
     const deck = shuffleDeck(generateDeck(rules));
@@ -137,7 +220,17 @@ export function initializeGame(region: Region = "chinese", debugScenario?: Debug
     // Roll dice for dealer determination
     const dice1 = Math.floor(Math.random() * 6) + 1;
     const dice2 = Math.floor(Math.random() * 6) + 1;
-    const dealerIndex = region === "shengzhou" ? (dice1 + dice2) % 4 : 0;
+
+    // 庄家确定: 有上局庄家则连庄，否则骰子决定
+    let dealerIndex: number;
+    let dealerStreak: number;
+    if (previousDealerIndex !== undefined) {
+        dealerIndex = previousDealerIndex;
+        dealerStreak = (previousDealerStreak || 0) + 1;
+    } else {
+        dealerIndex = region === "shengzhou" ? (dice1 + dice2) % 4 : 0;
+        dealerStreak = 1;
+    }
 
     for (let i = 0; i < 4; i++) {
         players.push({
@@ -220,6 +313,10 @@ export function initializeGame(region: Region = "chinese", debugScenario?: Debug
         caishenSourceTile,
         diceValues: [dice1, dice2] as [number, number],
         dealerIndex,
+        liabilityCount: { 0: {}, 1: {}, 2: {}, 3: {} },
+        caishenDiscardRound: null,
+        lostDianPao: { 0: false, 1: false, 2: false, 3: false },
+        dealerStreak,
     };
 
     return appendReplayEvent(initialState, {
@@ -363,14 +460,32 @@ export function discardTile(gameState: GameState, tileId: string): GameState {
         discards: [...currentPlayer.discards, tile],
     };
 
+    // 财神弃牌检测
+    let newCaishenRound = gameState.caishenDiscardRound;
+    const newLogs = [...gameState.logs, `Player ${currentPlayerIndex} discarded ${tile.suit} ${tile.rank}`];
+    if (gameState.caishenTile &&
+        tile.suit === gameState.caishenTile.suit &&
+        tile.rank === gameState.caishenTile.rank) {
+        if (newCaishenRound && newCaishenRound.discarderIndex === currentPlayerIndex) {
+            // 连续打财神
+            newCaishenRound = { ...newCaishenRound, consecutiveCount: newCaishenRound.consecutiveCount + 1 };
+            newLogs.push(`Player ${currentPlayerIndex} discards caishen AGAIN (${newCaishenRound.consecutiveCount} consecutive) - 飞鸟圈!`);
+        } else {
+            // 新的财神弃牌圈
+            newCaishenRound = { discarderIndex: currentPlayerIndex, consecutiveCount: 1 };
+            newLogs.push(`Player ${currentPlayerIndex} discards caishen - 飞鸟圈开始!`);
+        }
+    }
+
     const tempState = {
         ...gameState,
         players: newPlayers,
         lastDiscard: tile,
-        logs: [...gameState.logs, `Player ${currentPlayerIndex} discarded ${tile.suit} ${tile.rank}`],
+        logs: newLogs,
         phase: "CHECK" as const,
         checkIndex: (currentPlayerIndex + 1) % 4,
         pendingActions: {},
+        caishenDiscardRound: newCaishenRound,
     };
 
     return appendReplayEvent(tempState, {
@@ -423,9 +538,11 @@ export function performCheck(gameState: GameState): GameState {
     newLogs.push(`Player ${checkIndex} checking actions for ${lastDiscard.suit} ${lastDiscard.rank}...`);
 
     const isNextPlayer = checkIndex === (currentTurn + 1) % 4;
-    const canChi = isNextPlayer && ruleSet.chiRule.canChi(ctx);
-    const canPeng = ruleSet.pengRule.canPeng(ctx);
-    const canGang = ruleSet.gangRule.canGang(ctx);
+    // 财神弃牌圈: 不能吃碰杠，只能胡
+    const inCaishenRound = !!gameState.caishenDiscardRound;
+    const canChi = !inCaishenRound && isNextPlayer && ruleSet.chiRule.canChi(ctx);
+    const canPeng = !inCaishenRound && ruleSet.pengRule.canPeng(ctx);
+    const canGang = !inCaishenRound && ruleSet.gangRule.canGang(ctx);
     const huResult = ruleSet.huRule.canHu(ctx);
     const canHu = huResult.success;
 
@@ -462,8 +579,21 @@ export function stepGame(gameState: GameState): GameState {
     if (gameState.isGameOver) return gameState;
 
     switch (gameState.phase) {
-        case "DRAW":
-            return drawTile(gameState);
+        case "DRAW": {
+            // 财神弃牌圈结束检测: 当打财神的人轮到摸牌时，圈结束
+            let state = gameState;
+            if (state.caishenDiscardRound && state.currentTurn === state.caishenDiscardRound.discarderIndex) {
+                const newLostDianPao = { ...state.lostDianPao };
+                newLostDianPao[state.caishenDiscardRound.discarderIndex] = true;
+                state = {
+                    ...state,
+                    caishenDiscardRound: null,
+                    lostDianPao: newLostDianPao,
+                    logs: [...state.logs, `飞鸟圈结束: Player ${state.caishenDiscardRound.discarderIndex} 摸牌，永久失去点炮资格`],
+                };
+            }
+            return drawTile(state);
+        }
 
         case "DISCARD":
             // For bots: only check instant self-draw actions (hu/gang), then wait for LLM
@@ -478,14 +608,35 @@ export function stepGame(gameState: GameState): GameState {
                     const huResult = ruleSet.huRule.canHu(ctx);
                     if (huResult.success) {
                         const scoreResult = ruleSet.scoreRule.calculate(ctx, huResult);
-                        const newPlayers = applyScoreChanges(gameState.players, currentTurn, null, scoreResult.total);
+                        const newPlayers = applyScoreChanges(gameState.players, currentTurn, null, scoreResult.total, gameState.liabilityCount);
+                        const newLogs = [...gameState.logs];
+                        let finalPlayers = newPlayers;
+                        if (gameState.liabilityCount) {
+                            for (let i = 0; i < 4; i++) {
+                                if (i === currentTurn) continue;
+                                const claims = gameState.liabilityCount[i]?.[currentTurn] || 0;
+                                if (claims >= 3) {
+                                    newLogs.push(`承包: Player ${i} has chi/peng from Player ${currentTurn} ${claims} times - liable!`);
+                                }
+                            }
+                        }
+                        // 飞鸟赔偿
+                        if (gameState.caishenDiscardRound) {
+                            const { discarderIndex, consecutiveCount } = gameState.caishenDiscardRound;
+                            if (discarderIndex !== currentTurn) {
+                                const comp = calculateFeiniaoCompensation(consecutiveCount);
+                                finalPlayers = applyFeiniaoCompensation(finalPlayers, currentTurn, discarderIndex, comp.amount);
+                                newLogs.push(`飞鸟赔偿: Player ${discarderIndex} 连续打出${consecutiveCount}个财神(${comp.name} ${comp.fan}番)，赔偿 Player ${currentTurn} ${comp.amount}分`);
+                            }
+                        }
+                        newLogs.push(`Bot ${currentTurn} wins with self-draw Hu! Score: ${scoreResult.total}`);
                         return appendReplayEvent({
                             ...gameState,
-                            players: newPlayers,
+                            players: finalPlayers,
                             winner: currentTurn,
                             isGameOver: true,
                             scoreResult,
-                            logs: [...gameState.logs, `Bot ${currentTurn} wins with self-draw Hu! Score: ${scoreResult.total}`],
+                            logs: newLogs,
                         }, {
                             type: "win",
                             playerIndex: currentTurn,
@@ -609,6 +760,18 @@ function performAction(gameState: GameState, playerIndex: number, action: string
         melds: newMelds
     };
 
+    // 承包 (Liability) tracking: count chi/peng claims between players
+    const newLiability = { ...gameState.liabilityCount };
+    if (action === "chi" || action === "peng") {
+        const claimer = playerIndex;
+        const discarder = discarderIndex;
+        if (!newLiability[claimer]) newLiability[claimer] = {};
+        newLiability[claimer] = {
+            ...newLiability[claimer],
+            [discarder]: (newLiability[claimer]?.[discarder] || 0) + 1,
+        };
+    }
+
     return appendReplayEvent({
         ...gameState,
         players: newPlayers,
@@ -618,6 +781,7 @@ function performAction(gameState: GameState, playerIndex: number, action: string
         actionDecisions: {},
         actionTimer: 30,
         lastDiscard: null,
+        liabilityCount: newLiability,
         logs: [...gameState.logs, `Player ${playerIndex} performed ${action}`],
         phase: "DISCARD",
     }, {
@@ -639,6 +803,41 @@ export function resolvePendingActions(gameState: GameState): GameState {
     const actors = pendingPlayers.filter(p => actionDecisions[p] !== "pass");
 
     if (actors.length === 0) {
+        if (gameState.isQiangGangState) {
+            // All passed on qianggang - complete the kong and draw replacement
+            const kongDeclarer = gameState.currentTurn;
+            const player = gameState.players[kongDeclarer];
+            const tile = gameState.lastDiscard!;
+
+            // Find the peng meld to promote
+            const meldIndex = player.melds.findIndex(
+                m => m.type === "peng" && m.tiles[0]?.suit === tile.suit && m.tiles[0]?.rank === tile.rank
+            );
+
+            if (meldIndex !== -1) {
+                const newHand = player.hand.filter(t => t.id !== tile.id);
+                const newMelds = [...player.melds];
+                newMelds[meldIndex] = {
+                    type: "gang",
+                    tiles: [...newMelds[meldIndex].tiles, tile]
+                };
+                const newPlayers = [...gameState.players];
+                newPlayers[kongDeclarer] = { ...player, hand: newHand, melds: newMelds };
+
+                return drawTile({
+                    ...gameState,
+                    players: newPlayers,
+                    isWaitingForAction: false,
+                    pendingActions: {},
+                    actionDecisions: {},
+                    isQiangGangState: false,
+                    lastDiscard: null,
+                    logs: [...gameState.logs, `All passed on 抢杠. Player ${kongDeclarer} completes Jia Gang.`],
+                }, true);
+            }
+        }
+
+        // Normal pass - advance to next player
         const nextTurn = (gameState.currentTurn + 1) % 4;
         return appendReplayEvent({
             ...gameState,
@@ -646,6 +845,7 @@ export function resolvePendingActions(gameState: GameState): GameState {
             isWaitingForAction: false,
             pendingActions: {},
             actionDecisions: {},
+            isQiangGangState: false,
             actionTimer: 30,
             logs: [...gameState.logs, "All players passed"],
             phase: "DRAW",
@@ -675,21 +875,50 @@ export function resolvePendingActions(gameState: GameState): GameState {
 
     if (winningAction === "hu") {
         const ruleSet = createRuleSet(gameState.rules.region);
-        const ctx = createGameContext(gameState, winnerIndex, { discard: gameState.lastDiscard || undefined });
+        const isQiangGang = gameState.isQiangGangState === true;
+        const ctx = createGameContext(gameState, winnerIndex, {
+            discard: gameState.lastDiscard || undefined,
+            isQiangGang,
+        });
         const huResult = ruleSet.huRule.canHu(ctx);
         const scoreResult = ruleSet.scoreRule.calculate(ctx, huResult);
-        const newPlayers = applyScoreChanges(gameState.players, winnerIndex, gameState.currentTurn, scoreResult.total);
+        const newPlayers = applyScoreChanges(gameState.players, winnerIndex, gameState.currentTurn, scoreResult.total, gameState.liabilityCount);
+
+        // Log liability info if applicable
+        const newLogs = [...gameState.logs];
+        let finalPlayers = newPlayers;
+        if (gameState.liabilityCount) {
+            for (let i = 0; i < 4; i++) {
+                if (i === winnerIndex) continue;
+                const claims = gameState.liabilityCount[i]?.[winnerIndex] || 0;
+                if (claims >= 3) {
+                    newLogs.push(`承包: Player ${i} has chi/peng from Player ${winnerIndex} ${claims} times - liable!`);
+                }
+            }
+        }
+
+        // 飞鸟赔偿: 财神弃牌圈内有人胡，打财神者赔偿
+        if (gameState.caishenDiscardRound) {
+            const { discarderIndex, consecutiveCount } = gameState.caishenDiscardRound;
+            if (discarderIndex !== winnerIndex) {
+                const comp = calculateFeiniaoCompensation(consecutiveCount);
+                finalPlayers = applyFeiniaoCompensation(finalPlayers, winnerIndex, discarderIndex, comp.amount);
+                newLogs.push(`飞鸟赔偿: Player ${discarderIndex} 连续打出${consecutiveCount}个财神(${comp.name} ${comp.fan}番)，赔偿 Player ${winnerIndex} ${comp.amount}分`);
+            }
+        }
+
+        newLogs.push(`Player ${winnerIndex} wins with Hu! Score: ${scoreResult.total}`);
 
         return appendReplayEvent({
             ...gameState,
-            players: newPlayers,
+            players: finalPlayers,
             winner: winnerIndex,
             isGameOver: true,
             scoreResult,
             isWaitingForAction: false,
             pendingActions: {},
             actionDecisions: {},
-            logs: [...gameState.logs, `Player ${winnerIndex} wins with Hu! Score: ${scoreResult.total}`],
+            logs: newLogs,
         }, {
             type: "win",
             playerIndex: winnerIndex,
@@ -734,6 +963,49 @@ export function performJiaGang(gameState: GameState, playerIndex: number, tileId
 
     if (meldIndex === -1) return gameState;
 
+    // 抢杠 (Robbing the Kong): Check if any other player can hu off this tile
+    // before completing the kong
+    const ruleSet = createRuleSet(gameState.rules.region);
+    const newPendingActions: GameState["pendingActions"] = {};
+    let hasQiangGang = false;
+
+    gameState.players.forEach((p, i) => {
+        if (i === playerIndex) return; // Skip the kong declarer
+        const ctx = createGameContext(gameState, i, {
+            discard: tile,
+            isSelfDraw: false,
+            isQiangGang: true,
+        });
+        const huResult = ruleSet.huRule.canHu(ctx);
+        if (huResult.success) {
+            newPendingActions[i] = { chi: false, peng: false, gang: false, hu: true };
+            hasQiangGang = true;
+        }
+    });
+
+    if (hasQiangGang) {
+        // Someone can rob the kong - enter RESOLVE phase to let them decide
+        return appendReplayEvent({
+            ...gameState,
+            lastDiscard: tile,
+            isWaitingForAction: true,
+            pendingActions: newPendingActions,
+            actionDecisions: {},
+            actionTimer: 30,
+            phase: "RESOLVE",
+            isQiangGangState: true,
+            currentTurn: playerIndex, // The kong declarer is the "discarder" for scoring
+            logs: [...gameState.logs, `Player ${playerIndex} declares Jia Gang - checking for 抢杠 (Robbing Kong)`],
+        }, {
+            type: "action",
+            playerIndex,
+            tile,
+            action: "jia_gang",
+            message: `Player ${playerIndex} declares Jia Gang - checking for 抢杠`,
+        });
+    }
+
+    // No one can rob the kong - proceed normally
     const newHand = player.hand.filter(t => t.id !== tileId);
 
     const newMelds = [...player.melds];

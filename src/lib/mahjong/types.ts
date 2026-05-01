@@ -124,6 +124,12 @@ export interface GameContext {
     playerIndex: number;
     caishenTile?: Tile; // Shengzhou: the wildcard tile type
     isGangDraw?: boolean; // Whether this draw was from a gang (杠上开花)
+    isQiangGang?: boolean; // Whether this win is from robbing a kong (抢杠)
+    liabilityCount?: Record<number, Record<number, number>>; // 承包 tracking
+    caishenDiscardRound?: { discarderIndex: number; consecutiveCount: number } | null; // 财神弃牌圈
+    lostDianPao?: Record<number, boolean>; // 永久失去点炮资格
+    dealerStreak?: number; // 连庄次数
+    isDealer?: boolean; // 当前玩家是否是庄家
 }
 
 // Hu result
@@ -240,4 +246,17 @@ export interface GameState {
     caishenSourceTile?: Tile; // The tile that was flipped to determine caishen
     diceValues?: [number, number]; // Dice roll values for game start ceremony
     dealerIndex?: number; // Dealer (庄家) index
+    isQiangGangState?: boolean; // Whether the current RESOLVE phase is a qianggang (robbing kong)
+    // 承包 (Liability): track how many times each player has chi/peng from each other player
+    // liabilityCount[claimer][discarder] = count of chi/peng claims
+    liabilityCount?: Record<number, Record<number, number>>;
+    // 财神弃牌圈: 打出财神后，到该玩家摸牌为止，不能吃碰杠
+    caishenDiscardRound?: {
+        discarderIndex: number;    // 谁打出的财神
+        consecutiveCount: number;  // 连续打出的财神数
+    } | null;
+    // 永久失去点炮资格（打出财神一圈后没胡）
+    lostDianPao?: Record<number, boolean>;
+    // 连庄次数: 庄家连续坐庄的次数（从1开始）
+    dealerStreak?: number;
 }

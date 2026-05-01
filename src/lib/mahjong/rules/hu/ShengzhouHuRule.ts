@@ -3,8 +3,9 @@ import { HuRule, GameContext, HuResult, Tile } from "../../types";
 /**
  * 嵊州麻将胡牌规则
  * - 支持财神（百搭）替代任意牌
- * - 支持推倒胡、七对子
  * - 财神可代替任何牌组成顺子、刻子、对子
+ * - 支持财鸟/飞鸟/抢杠检测
+ * - 有财神或存在承包关系时，不能点炮胡（自摸/杠开/抢杠仍可以）
  */
 export class ShengzhouHuRule implements HuRule {
     canHu(ctx: GameContext): HuResult {
@@ -12,21 +13,35 @@ export class ShengzhouHuRule implements HuRule {
         const success = this.checkWinWithCaishen(fullHand, ctx.caishenTile);
         if (!success) return { success: false, patterns: [] };
 
+        // 点炮限制: 有财神、存在承包关系、或永久失去点炮资格时，不能点炮胡
+        if (!ctx.isSelfDraw && !ctx.isGangDraw && !ctx.isQiangGang && ctx.discard) {
+            // 有财神不能点炮
+            if (ctx.caishenTile && this.hasCaishenInHand(ctx.hand, ctx.caishenTile)) {
+                return { success: false, patterns: [] };
+            }
+            // 存在承包关系不能点炮
+            if (this.hasLiability(ctx)) {
+                return { success: false, patterns: [] };
+            }
+            // 永久失去点炮资格（打出财神一圈后没胡）
+            if (ctx.lostDianPao?.[ctx.playerIndex]) {
+                return { success: false, patterns: [] };
+            }
+        }
+
         const patterns: string[] = ["standard"];
         if (ctx.isSelfDraw) patterns.push("zimo");
         if (ctx.isGangDraw) patterns.push("gangkai");
-        if (this.checkSevenPairsWithCaishen(fullHand, ctx.caishenTile)) patterns.push("qiduizi");
+        if (ctx.isQiangGang) patterns.push("qianggang");
 
-        // Check for 碰碰和 (all triplets + pair)
-        if (this.checkPengPengHu(fullHand, ctx.melds, ctx.caishenTile)) patterns.push("pengpenghu");
-
-        // Check 清一色
-        const allTiles = [...fullHand, ...ctx.melds.flatMap(m => m.tiles)];
-        if (this.checkQingYiSe(allTiles, ctx.caishenTile)) patterns.push("qingyise");
-
-        // Check if caishen is used in winning hand
-        if (ctx.caishenTile && this.hasCaishenInHand(fullHand, ctx.caishenTile)) {
-            patterns.push("cainio");
+        // Check 财鸟/飞鸟 - 手牌中连续财神数决定等级
+        if (ctx.caishenTile && this.hasCaishenInHand(ctx.hand, ctx.caishenTile)) {
+            const consecutiveCount = this.getMaxConsecutiveCaishen(ctx.hand, ctx.caishenTile);
+            if (consecutiveCount >= 2) {
+                patterns.push("feiniao"); // 2+ consecutive = 飞鸟
+            } else if (consecutiveCount === 1) {
+                patterns.push("cainio"); // 1 caishen = 财鸟
+            }
         }
 
         return { success: true, patterns };
@@ -46,6 +61,39 @@ export class ShengzhouHuRule implements HuRule {
         return hand.some(t => this.isCaishen(t, caishenTile));
     }
 
+    // 承包检查: 玩家与出牌者之间是否存在承包关系（互相吃/碰3次以上）
+    private hasLiability(ctx: GameContext): boolean {
+        if (!ctx.liabilityCount || ctx.discard === undefined) return false;
+        const player = ctx.playerIndex;
+        const discarder = ctx.currentTurn;
+        // 我对出牌者的吃碰次数
+        const myClaims = ctx.liabilityCount[player]?.[discarder] || 0;
+        // 出牌者对我的吃碰次数
+        const theirClaims = ctx.liabilityCount[discarder]?.[player] || 0;
+        return myClaims >= 3 || theirClaims >= 3;
+    }
+
+    // 检测手牌中最长连续财神数
+    private getMaxConsecutiveCaishen(hand: Tile[], caishenTile?: Tile): number {
+        if (!caishenTile || hand.length === 0) return 0;
+        const sorted = [...hand].sort((a, b) => {
+            if (a.suit !== b.suit) return a.suit.localeCompare(b.suit);
+            if (typeof a.rank === "number" && typeof b.rank === "number") return a.rank - b.rank;
+            return String(a.rank).localeCompare(String(b.rank));
+        });
+        let maxConsecutive = 0;
+        let currentConsecutive = 0;
+        for (const tile of sorted) {
+            if (tile.suit === caishenTile.suit && tile.rank === caishenTile.rank) {
+                currentConsecutive++;
+                maxConsecutive = Math.max(maxConsecutive, currentConsecutive);
+            } else {
+                currentConsecutive = 0;
+            }
+        }
+        return maxConsecutive;
+    }
+
     checkWinWithCaishen(hand: Tile[], caishenTile?: Tile): boolean {
         if (hand.length % 3 !== 2) return false;
 
@@ -59,13 +107,8 @@ export class ShengzhouHuRule implements HuRule {
             ? hand.filter(t => !this.isCaishen(t, caishenTile))
             : hand;
 
-        // Try standard win with wildcards
-        if (this.canFormWinningHand(normalTiles, caishenCount)) return true;
-
-        // Try seven pairs
-        if (hand.length === 14 && this.checkSevenPairsWithCaishen(hand, caishenTile)) return true;
-
-        return false;
+        // Try standard win (4 melds + 1 pair) with wildcards
+        return this.canFormWinningHand(normalTiles, caishenCount);
     }
 
     private canFormWinningHand(normalTiles: Tile[], wildcards: number): boolean {
@@ -192,118 +235,6 @@ export class ShengzhouHuRule implements HuRule {
             keys.push(`dragon-${rank}`);
         }
         return keys;
-    }
-
-    private checkSevenPairsWithCaishen(hand: Tile[], caishenTile?: Tile): boolean {
-        if (hand.length !== 14) return false;
-
-        const caishenCount = caishenTile
-            ? hand.filter(t => this.isCaishen(t, caishenTile)).length
-            : 0;
-
-        const normalTiles = caishenTile
-            ? hand.filter(t => !this.isCaishen(t, caishenTile))
-            : hand;
-
-        const countMap = new Map<string, number>();
-        normalTiles.forEach(t => {
-            const key = `${t.suit}-${t.rank}`;
-            countMap.set(key, (countMap.get(key) || 0) + 1);
-        });
-
-        // Count how many wildcards needed to form 7 pairs
-        let wildcardsNeeded = 0;
-        for (const count of countMap.values()) {
-            // Odd counts need 1 wildcard to pair
-            wildcardsNeeded += count % 2;
-        }
-
-        return wildcardsNeeded <= caishenCount;
-    }
-
-    private checkPengPengHu(hand: Tile[], melds: { type: string; tiles: Tile[] }[], caishenTile?: Tile): boolean {
-        // All melds must be peng or gang
-        const meldOk = melds.every(m => m.type === "peng" || m.type === "gang");
-        if (!meldOk && melds.length > 0) return false;
-
-        // Hand (remaining tiles) must form only triplets + 1 pair, using caishen as wildcards
-        const caishenCount = caishenTile
-            ? hand.filter(t => this.isCaishen(t, caishenTile)).length
-            : 0;
-
-        const normalTiles = caishenTile
-            ? hand.filter(t => !this.isCaishen(t, caishenTile))
-            : hand;
-
-        const countMap = new Map<string, number>();
-        normalTiles.forEach(t => {
-            const key = `${t.suit}-${t.rank}`;
-            countMap.set(key, (countMap.get(key) || 0) + 1);
-        });
-
-        // Check: each group should be 3 (triplet) or part of pair (2)
-        // With wildcards filling in
-        let wildsLeft = caishenCount;
-        let pairFound = false;
-
-        const counts = [...countMap.values()].sort((a, b) => b - a);
-        for (const count of counts) {
-            let remaining = count;
-            while (remaining > 0) {
-                if (remaining >= 3) {
-                    remaining -= 3;
-                } else if (remaining === 2) {
-                    if (!pairFound) {
-                        pairFound = true;
-                        remaining = 0;
-                    } else {
-                        // Need 1 wildcard to make triplet
-                        if (wildsLeft >= 1) {
-                            wildsLeft--;
-                            remaining = 0;
-                        } else {
-                            return false;
-                        }
-                    }
-                } else { // remaining === 1
-                    // Need 2 wildcards for triplet, or use as pair if not found
-                    if (!pairFound && wildsLeft >= 1) {
-                        pairFound = true;
-                        wildsLeft--;
-                        remaining = 0;
-                    } else if (wildsLeft >= 2) {
-                        wildsLeft -= 2;
-                        remaining = 0;
-                    } else {
-                        return false;
-                    }
-                }
-            }
-        }
-
-        // Remaining wildcards form triplets (groups of 3)
-        while (wildsLeft >= 3) wildsLeft -= 3;
-        if (wildsLeft === 2) {
-            if (!pairFound) { pairFound = true; wildsLeft = 0; }
-            else return false;
-        }
-        if (wildsLeft === 1) {
-            return false;
-        }
-
-        return pairFound;
-    }
-
-    private checkQingYiSe(allTiles: Tile[], caishenTile?: Tile): boolean {
-        const nonCaishen = caishenTile
-            ? allTiles.filter(t => !this.isCaishen(t, caishenTile))
-            : allTiles;
-
-        if (nonCaishen.length === 0) return true;
-
-        const suits = new Set(nonCaishen.map(t => t.suit));
-        if (suits.size !== 1) return false;
-        return ["bamboo", "character", "dot"].includes([...suits][0]);
     }
 
     getTenpaiTiles(hand: Tile[], caishenTile?: Tile): Tile[] {

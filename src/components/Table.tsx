@@ -909,7 +909,13 @@ export function Table({ region: initialRegion = "chinese" }: TableProps) {
     };
 
     const handleNewGame = () => {
-        const newGame = initializeGame(region);
+        // 庄家继承: 赢家成为下局庄家，连庄累加
+        const winner = gameState?.winner ?? null;
+        const prevDealer = gameState?.dealerIndex;
+        const prevStreak = gameState?.dealerStreak || 1;
+        const newDealer = winner !== null && winner !== undefined ? winner : prevDealer;
+        const newStreak = (newDealer === prevDealer) ? prevStreak + 1 : 1;
+        const newGame = initializeGame(region, undefined, newDealer, newStreak);
         setGameState(newGame);
         setLlmDebugEntries([]);
         setIsPaused(false);

@@ -11,7 +11,7 @@ export function Onboarding({ onSelectRegion }: OnboardingProps) {
         {
             id: "shengzhou",
             name: "嵊州麻将",
-            desc: "136张牌，财神（百搭）机制，推倒胡，可点炮，财鸟/飞鸟加番。",
+            desc: "136张牌，财神机制，自摸2番，庄家+1番，连庄翻倍，财鸟5番/飞鸟递进，杠开/抢杠5番。",
             icon: "🎲",
         },
         {
