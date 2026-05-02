@@ -1,8 +1,8 @@
 "use client";
 
-import React, { useEffect, useState, useRef } from "react";
+import React, { useEffect, useState, useRef, useCallback } from "react";
 import { DebugScenario, GameState, Region, ReplayEvent } from "@/lib/mahjong/types";
-import { initializeGame, drawTile, discardTile, recordLlmAdvice, recordAction, resolvePendingActions, stepGame } from "@/lib/mahjong/game";
+import { initializeGame, drawTile, discardTile, recordLlmAdvice, recordAction, resolvePendingActions, stepGame, applyScoreChanges, calculateFeiniaoCompensation, applyFeiniaoCompensation, performJiaGang } from "@/lib/mahjong/game";
 import { createRuleSet } from "@/lib/mahjong/rules";
 import { createGameContext } from "@/lib/mahjong/rules/context";
 import { Hand } from "./Hand";
@@ -54,7 +54,11 @@ export function Table({ region: initialRegion = "chinese" }: TableProps) {
     const [llmAnalysis, setLlmAnalysis] = useState<string | null>(null);
     const [isLlmLoading, setIsLlmLoading] = useState(false);
     const [llmAnalysisKey, setLlmAnalysisKey] = useState<string>("");
+
+    // Game persistence for training data
+    const [gameId, setGameId] = useState(() => crypto.randomUUID());
     const [deferredAnalysisMode, setDeferredAnalysisMode] = useState(false);
+    const [pendingDiscardTileId, setPendingDiscardTileId] = useState<string | null>(null);
     const [showReview, setShowReview] = useState(false);
 
     // Shengzhou game start ceremony states
@@ -68,6 +72,7 @@ export function Table({ region: initialRegion = "chinese" }: TableProps) {
     const llmInFlightRef = useRef(false);
     const adviceInFlightRef = useRef(false);
     const adviceKeyRef = useRef("");
+    const pendingDiscardRef = useRef<string | null>(null); // Ref for pending discard tile ID
 
     useEffect(() => {
         isPausedRef.current = isPaused;
@@ -123,6 +128,7 @@ export function Table({ region: initialRegion = "chinese" }: TableProps) {
                     playerIndex,
                     action: "discard",
                     tile,
+                    actionSource: "rule_based",
                     llmAnalysis: "延迟分析模式：使用规则 AI",
                     isLlmFallback: true,
                 });
@@ -165,6 +171,7 @@ export function Table({ region: initialRegion = "chinese" }: TableProps) {
                     playerIndex,
                     action: "discard",
                     tile,
+                    actionSource: response.fallback ? "rule_based" : "llm",
                     llmAnalysis: response.analysis,
                     isLlmFallback: response.fallback,
                 });
@@ -196,6 +203,7 @@ export function Table({ region: initialRegion = "chinese" }: TableProps) {
                     playerIndex,
                     action: "discard",
                     tile,
+                    actionSource: "rule_based",
                     llmAnalysis: `LLM 决策失败，使用规则 AI。原因：${message}`,
                     isLlmFallback: true,
                 });
@@ -220,6 +228,19 @@ export function Table({ region: initialRegion = "chinese" }: TableProps) {
         const decisions = await Promise.all(pendingBotPlayers.map(async (playerIndex) => {
             const pending = state.pendingActions[playerIndex];
             const fallbackAction = decideBotAction(state, playerIndex, pending);
+
+            // Skip LLM if bot has no real choice (only pass available)
+            const hasRealChoice = Object.entries(pending || {}).some(([action, enabled]) => action !== "pass" && enabled);
+            if (!hasRealChoice) {
+                addLlmDebugEntry({
+                    playerIndex,
+                    mode: "action",
+                    result: "pass",
+                    analysis: "无可用动作，自动跳过",
+                    fallback: true,
+                });
+                return [playerIndex, "pass", "无可用动作，自动跳过", true] as const;
+            }
 
             // In deferred mode, skip LLM and use rule-based AI
             if (deferredAnalysisMode) {
@@ -291,6 +312,7 @@ export function Table({ region: initialRegion = "chinese" }: TableProps) {
                 stateWithActions = recordAction(stateWithActions, {
                     playerIndex,
                     action: action as any,
+                    actionSource: isFallback ? "rule_based" : "llm",
                     llmAnalysis: analysis,
                     isLlmFallback: isFallback,
                 });
@@ -304,6 +326,14 @@ export function Table({ region: initialRegion = "chinese" }: TableProps) {
     };
 
     const requestHumanAdvice = async (state: GameState, availableActions: Partial<Record<MahjongAction, boolean>>) => {
+        // Skip LLM call if player has no meaningful actions to consider
+        const hasSpecialAction = Object.entries(availableActions).some(([action, enabled]) => action !== "pass" && enabled);
+        const canDiscard = state.phase === "DISCARD" && state.currentTurn === 0 && state.players[0].hand.length % 3 === 2;
+        if (!hasSpecialAction && !canDiscard) {
+            adviceInFlightRef.current = false;
+            return;
+        }
+
         adviceInFlightRef.current = true;
         try {
             const response = await requestMahjongAI({
@@ -393,8 +423,25 @@ export function Table({ region: initialRegion = "chinese" }: TableProps) {
                 if (!prevState || prevState.isGameOver) return prevState;
                 if (llmInFlightRef.current) return prevState;
 
-                // If it's human's turn to DISCARD, we don't step automatically
-                // Unless we implement auto-discard for human later
+                // Process pending human discard (set by handleTileClick via ref)
+                if (pendingDiscardRef.current && prevState.phase === "DISCARD" && prevState.currentTurn === 0) {
+                    const tileId = pendingDiscardRef.current;
+                    pendingDiscardRef.current = null;
+                    const tile = prevState.players[0].hand.find(t => t.id === tileId);
+                    let newState = recordAction(prevState, {
+                        playerIndex: 0,
+                        action: "discard",
+                        tile,
+                        actionSource: "human",
+                    });
+                    newState = discardTile(newState, tileId);
+                    setPendingDiscardTileId(null);
+                    setLlmAnalysis(null);
+                    setIsLlmLoading(false);
+                    return { ...newState, selfDrawPassed: false };
+                }
+
+                // If it's human's turn to DISCARD (no pending), don't step
                 if (prevState.phase === "DISCARD" && prevState.currentTurn === 0) {
                     return prevState;
                 }
@@ -442,6 +489,29 @@ export function Table({ region: initialRegion = "chinese" }: TableProps) {
         }
     }, [gameState?.isGameOver]);
 
+    // Save game data for training on game over
+    useEffect(() => {
+        if (!gameState?.isGameOver || !gameState.actionHistory?.length) return;
+        const saveData = async () => {
+            try {
+                await fetch("/api/games", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({
+                        gameId,
+                        region,
+                        gameState,
+                        actionHistory: gameState.actionHistory,
+                        replayEvents: gameState.replayEvents,
+                    }),
+                });
+            } catch (err) {
+                console.error("Failed to save game data:", err);
+            }
+        };
+        void saveData();
+    }, [gameState?.isGameOver]);
+
     // Compute tenpai tiles for human player
     useEffect(() => {
         if (!gameState || gameState.currentTurn !== 0 || gameState.phase !== "DISCARD") {
@@ -480,7 +550,7 @@ export function Table({ region: initialRegion = "chinese" }: TableProps) {
 
         // Only call LLM when it's the player's turn to act
         const isDiscardPhase = gameState.phase === "DISCARD";
-        const isResolvePhase = gameState.phase === "RESOLVE" && gameState.pendingActions[0];
+        const isResolvePhase = gameState.phase === "RESOLVE" && gameState.pendingActions[0] && !gameState.actionDecisions[0];
 
         if (!isDiscardPhase && !isResolvePhase) {
             setLlmAnalysis(null);
@@ -493,8 +563,9 @@ export function Table({ region: initialRegion = "chinese" }: TableProps) {
         const actionKey = `${gameState.phase}-${gameState.currentTurn}-${handKey}`;
         if (actionKey === llmAnalysisKey) return;
 
+        setIsLlmLoading(true);
+
         const fetchAnalysis = async () => {
-            setIsLlmLoading(true);
             setLlmAnalysisKey(actionKey);
 
             try {
@@ -645,22 +716,11 @@ export function Table({ region: initialRegion = "chinese" }: TableProps) {
         if (!gameState) return;
         if (gameState.isWaitingForAction) return; // Can't discard while waiting
         if (gameState.currentTurn !== 0) return;
-        if (isLlmLoading) return; // Wait for LLM analysis
+        if (pendingDiscardRef.current) return; // Already pending
 
-        // Record action
-        const tile = gameState.players[0].hand.find(t => t.id === tileId);
-        let newState = recordAction(gameState, {
-            playerIndex: 0,
-            action: "discard",
-            tile,
-            llmAnalysis: llmAnalysis || undefined,
-        });
-
-        // Discard logic
-        newState = discardTile(newState, tileId);
-        // Reset selfDrawPassed flag when discarding
-        setGameState({ ...newState, selfDrawPassed: false });
-        setLlmAnalysis(null); // Clear analysis after action
+        pendingDiscardRef.current = tileId;
+        // Force re-render so the game loop picks up the pending discard
+        setPendingDiscardTileId(tileId);
         playSound("tileDiscard");
     };
 
@@ -728,7 +788,6 @@ export function Table({ region: initialRegion = "chinese" }: TableProps) {
 
     const handleAction = (action: string, playerIndex: number = 0) => {
         if (!gameState) return;
-        if (isLlmLoading) return; // Wait for LLM analysis
         console.log(`Player ${playerIndex} chose ${action}`);
 
         // Handle self-draw actions (during DISCARD phase, player's own turn)
@@ -739,21 +798,37 @@ export function Table({ region: initialRegion = "chinese" }: TableProps) {
                 const ctx = createGameContext(gameState, playerIndex, { isSelfDraw: true });
                 const huResult = ruleSet.huRule.canHu(ctx);
                 const scoreResult = ruleSet.scoreRule.calculate(ctx, huResult);
-                // Apply score changes inline
-                const newPlayers = gameState.players.map(p => ({ ...p }));
-                const perPlayer = Math.floor(scoreResult.total / 3);
-                newPlayers.forEach((p, i) => {
-                    if (i === playerIndex) p.score += scoreResult.total;
-                    else p.score -= perPlayer;
-                });
+                // Use proper score settlement (handles 承包 and 飞鸟赔偿)
+                let finalPlayers = applyScoreChanges(gameState.players, playerIndex, null, scoreResult.total, gameState.liabilityCount);
+                const newLogs = [...gameState.logs];
+                // Log liability info
+                if (gameState.liabilityCount) {
+                    for (let i = 0; i < 4; i++) {
+                        if (i === playerIndex) continue;
+                        const claims = gameState.liabilityCount[i]?.[playerIndex] || 0;
+                        if (claims >= 3) {
+                            newLogs.push(`承包: Player ${i} has chi/peng from Player ${playerIndex} ${claims} times - liable!`);
+                        }
+                    }
+                }
+                // 飞鸟赔偿
+                if (gameState.caishenDiscardRound) {
+                    const { discarderIndex, consecutiveCount } = gameState.caishenDiscardRound;
+                    if (discarderIndex !== playerIndex) {
+                        const comp = calculateFeiniaoCompensation(consecutiveCount);
+                        finalPlayers = applyFeiniaoCompensation(finalPlayers, playerIndex, discarderIndex, comp.amount);
+                        newLogs.push(`飞鸟赔偿: Player ${discarderIndex} 连续打出${consecutiveCount}个财神(${comp.name} ${comp.fan}番)，赔偿 Player ${playerIndex} ${comp.amount}分`);
+                    }
+                }
+                newLogs.push(`Player ${playerIndex} wins with self-draw Hu! Score: ${scoreResult.total}`);
                 playSound("tileHu");
                 setGameState({
                     ...gameState,
-                    players: newPlayers,
+                    players: finalPlayers,
                     winner: playerIndex,
                     isGameOver: true,
                     scoreResult,
-                    logs: [...gameState.logs, `Player ${playerIndex} wins with self-draw Hu! Score: ${scoreResult.total}`],
+                    logs: newLogs,
                 });
                 return;
             }
@@ -794,30 +869,14 @@ export function Table({ region: initialRegion = "chinese" }: TableProps) {
                     return;
                 }
 
-                // Check for Jia Gang (add to existing Peng)
-                const pengMeld = player.melds.find(m => m.type === "peng");
-                if (pengMeld) {
-                    const jiaGangTile = hand.find(t => t.suit === pengMeld.tiles[0].suit && t.rank === pengMeld.tiles[0].rank);
+                // Check for Jia Gang (add to existing Peng) - find any peng that matches a tile in hand
+                for (const meld of player.melds) {
+                    if (meld.type !== "peng") continue;
+                    const jiaGangTile = hand.find(t => t.suit === meld.tiles[0].suit && t.rank === meld.tiles[0].rank);
                     if (jiaGangTile) {
-                        // Perform Jia Gang
-                        const newHand = hand.filter(t => t.id !== jiaGangTile.id);
-                        const newMelds = player.melds.map(m => {
-                            if (m.type === "peng" && m.tiles[0].suit === pengMeld.tiles[0].suit && m.tiles[0].rank === pengMeld.tiles[0].rank) {
-                                return { ...m, type: "gang" as const, tiles: [...m.tiles, jiaGangTile] };
-                            }
-                            return m;
-                        });
-                        const newPlayers = [...gameState.players];
-                        newPlayers[playerIndex] = {
-                            ...newPlayers[playerIndex],
-                            hand: newHand,
-                            melds: newMelds,
-                        };
-                        const newState = drawTile({
-                            ...gameState,
-                            players: newPlayers,
-                            logs: [...gameState.logs, `Player ${playerIndex} performs Jia Gang (Add Kong)`],
-                        }, true);
+                        // Use performJiaGang which properly checks for 抢杠 (robbing kong)
+                        playSound("tileGang");
+                        const newState = performJiaGang(gameState, playerIndex, jiaGangTile.id);
                         setGameState(newState);
                         return;
                     }
@@ -916,6 +975,7 @@ export function Table({ region: initialRegion = "chinese" }: TableProps) {
         const newDealer = winner !== null && winner !== undefined ? winner : prevDealer;
         const newStreak = (newDealer === prevDealer) ? prevStreak + 1 : 1;
         const newGame = initializeGame(region, undefined, newDealer, newStreak);
+        setGameId(crypto.randomUUID());
         setGameState(newGame);
         setLlmDebugEntries([]);
         setIsPaused(false);
@@ -950,6 +1010,21 @@ export function Table({ region: initialRegion = "chinese" }: TableProps) {
         void requestHumanAdvice(gameState, availableActions);
     }, [gameState, isDevMode, isLlmDebug]);
 
+    // Stable callback for dice animation completion — prevents re-starting the animation on re-renders
+    const handleDiceComplete = useCallback(() => {
+        setShowDiceAnimation(false);
+        if (gameState?.caishenSourceTile && gameState?.caishenTile) {
+            setShowCaishenReveal(true);
+        } else {
+            setCeremonyComplete(true);
+        }
+    }, [gameState?.caishenSourceTile, gameState?.caishenTile]);
+
+    const handleCaishenRevealComplete = useCallback(() => {
+        setShowCaishenReveal(false);
+        setCeremonyComplete(true);
+    }, []);
+
     if (!mounted) return <div className="flex items-center justify-center h-screen bg-[#1e5128] text-white">Loading...</div>;
     if (error) return <div className="flex items-center justify-center h-screen text-red-500">Error: {error}</div>;
     if (!gameState) return <div className="flex items-center justify-center h-screen bg-[#1e5128] text-white">Loading...</div>;
@@ -964,14 +1039,7 @@ export function Table({ region: initialRegion = "chinese" }: TableProps) {
             {showDiceAnimation && gameState?.diceValues && (
                 <DiceAnimation
                     diceValues={gameState.diceValues}
-                    onComplete={() => {
-                        setShowDiceAnimation(false);
-                        if (gameState?.caishenSourceTile && gameState?.caishenTile) {
-                            setShowCaishenReveal(true);
-                        } else {
-                            setCeremonyComplete(true);
-                        }
-                    }}
+                    onComplete={handleDiceComplete}
                 />
             )}
 
@@ -980,10 +1048,7 @@ export function Table({ region: initialRegion = "chinese" }: TableProps) {
                 <CaishenReveal
                     sourceTile={gameState.caishenSourceTile}
                     caishenTile={gameState.caishenTile}
-                    onComplete={() => {
-                        setShowCaishenReveal(false);
-                        setCeremonyComplete(true);
-                    }}
+                    onComplete={handleCaishenRevealComplete}
                 />
             )}
 
@@ -1025,7 +1090,7 @@ export function Table({ region: initialRegion = "chinese" }: TableProps) {
                 onToggleAnalysis={() => setIsLlmDebug(!isLlmDebug)}
             />
             {/* Top Controls */}
-            <div className="fixed top-4 left-4 z-50 flex items-center gap-2">
+            <div className="fixed top-4 left-4 z-50 flex items-center gap-2" {...(!ceremonyComplete ? { inert: true } : {})}>
                 <button
                     onClick={() => { handleNewGame(); playSound("tileClick"); }}
                     className="px-3 py-1.5 bg-amber-600 hover:bg-amber-500 text-white text-sm font-bold rounded-lg shadow-lg transition-colors"
@@ -1211,37 +1276,36 @@ export function Table({ region: initialRegion = "chinese" }: TableProps) {
                 />
             )}
 
-            {/* Center Table (Discard Area) - Fixed Size in Middle */}
+            {/* Center Table (Discard Area) - z-20 above hand overlays (z-10) */}
+            {/* Center Table background (z-0) */}
             <div className="fixed inset-0 m-auto w-[400px] h-[400px] bg-[#1e5128] rounded-xl border-4 border-[#2a6b35] shadow-2xl flex items-center justify-center z-0">
-                {/* Game Info (Wall Count + Wind Indicators) */}
                 <GameInfo
                     wallCount={gameState.wallCount}
                     currentTurn={gameState.currentTurn}
                     playerWinds={gameState.players.map(p => p.wind)}
                     playerScores={gameState.players.map(p => p.score)}
                 />
+                {thinkingPlayer !== null && (
+                    <div className="absolute bottom-2 left-1/2 transform -translate-x-1/2 bg-amber-900/80 text-amber-300 text-xs px-3 py-1 rounded-full animate-pulse whitespace-nowrap">
+                        Bot {thinkingPlayer} 思考中...
+                    </div>
+                )}
+            </div>
 
-                {/* Discard Piles & Turn Indicators */}
-
-                {/* Player 2 (Top) */}
+            {/* Discard Piles (z-20, pointer-events-none) — above hand overlays (z-10) */}
+            <div className="fixed inset-0 m-auto w-[400px] h-[400px] z-20 pointer-events-none">
                 <div className="absolute top-4 left-1/2 transform -translate-x-1/2 rotate-180 flex flex-col items-center gap-2">
                     <DiscardPile tiles={gameState.players[2].discards} />
                     <TurnIndicator isActive={gameState.currentTurn === 2} />
                 </div>
-
-                {/* Player 3 (Left) */}
                 <div className="absolute left-4 top-1/2 transform -translate-y-1/2 rotate-90 flex flex-col items-center gap-2">
                     <DiscardPile tiles={gameState.players[3].discards} />
                     <TurnIndicator isActive={gameState.currentTurn === 3} />
                 </div>
-
-                {/* Player 1 (Right) */}
                 <div className="absolute right-4 top-1/2 transform -translate-y-1/2 -rotate-90 flex flex-col items-center gap-2">
                     <DiscardPile tiles={gameState.players[1].discards} />
                     <TurnIndicator isActive={gameState.currentTurn === 1} />
                 </div>
-
-                {/* Player 0 (Bottom/You) */}
                 <div className="absolute bottom-4 left-1/2 transform -translate-x-1/2 flex flex-col items-center gap-2">
                     <TurnIndicator isActive={gameState.currentTurn === 0} isHuman={true} />
                     <DiscardPile tiles={gameState.players[0].discards} />
@@ -1289,7 +1353,7 @@ export function Table({ region: initialRegion = "chinese" }: TableProps) {
                             availableActions={getAvailableActions(0)}
                             onAction={(action: string) => handleAction(action, 0)}
                             timer={gameState.actionTimer}
-                            disabled={isLlmLoading}
+                            disabled={false}
                         />
                     </div>
                     <div className="flex items-end gap-2">
@@ -1299,7 +1363,7 @@ export function Table({ region: initialRegion = "chinese" }: TableProps) {
                             isCurrentPlayer={gameState.currentTurn === 0}
                             onTileClick={handleTileClick}
                             tenpaiTileIds={tenpaiTileIds}
-                            disabled={isLlmLoading}
+                            disabled={false}
                             caishenTile={gameState.caishenTile}
                         />
                     </div>
@@ -1329,11 +1393,11 @@ export function Table({ region: initialRegion = "chinese" }: TableProps) {
                         </div>
                     )}
 
-                    {/* Loading overlay when LLM is analyzing */}
+                    {/* LLM analysis indicator (non-blocking) */}
                     {isLlmLoading && gameState.currentTurn === 0 && (
-                        <div className="absolute inset-0 bg-black/20 flex items-center justify-center pointer-events-none">
-                            <div className="bg-blue-900/80 px-4 py-2 rounded-lg text-blue-200 text-sm font-bold">
-                                AI 分析中，请稍候...
+                        <div className="absolute top-2 right-2 pointer-events-none">
+                            <div className="bg-blue-900/80 px-3 py-1 rounded-lg text-blue-200 text-xs font-bold animate-pulse">
+                                AI 分析中...
                             </div>
                         </div>
                     )}

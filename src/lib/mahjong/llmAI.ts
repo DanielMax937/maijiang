@@ -26,19 +26,29 @@ export interface MahjongAIResponse {
 }
 
 export async function requestMahjongAI(request: MahjongAIRequest): Promise<MahjongAIResponse> {
-    const response = await fetch("/api/mahjong-ai", {
-        method: "POST",
-        headers: {
-            "Content-Type": "application/json",
-        },
-        body: JSON.stringify(request),
-    });
+    const controller = new AbortController();
+    // All LLM calls allow up to 60s — AI analysis may take longer with complex game states
+    const timeoutMs = 60000;
+    const timeout = setTimeout(() => controller.abort(), timeoutMs);
 
-    const payload = await response.json().catch(() => null);
-    if (!response.ok) {
-        const message = payload?.error || `Mahjong AI request failed with ${response.status}`;
-        throw new Error(message);
+    try {
+        const response = await fetch("/api/mahjong-ai", {
+            method: "POST",
+            headers: {
+                "Content-Type": "application/json",
+            },
+            body: JSON.stringify(request),
+            signal: controller.signal,
+        });
+
+        const payload = await response.json().catch(() => null);
+        if (!response.ok) {
+            const message = payload?.error || `Mahjong AI request failed with ${response.status}`;
+            throw new Error(message);
+        }
+
+        return payload as MahjongAIResponse;
+    } finally {
+        clearTimeout(timeout);
     }
-
-    return payload as MahjongAIResponse;
 }

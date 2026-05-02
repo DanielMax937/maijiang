@@ -47,6 +47,55 @@ function playerSummary(gameState: GameState): string {
     }).join("\n\n");
 }
 
+// Privacy-aware summary: only show target player's hand, public info for all
+function playerSummaryForAI(gameState: GameState, targetPlayerIndex: number): string {
+    return gameState.players.map((player) => {
+        const isTarget = player.id === targetPlayerIndex;
+        const hand = isTarget
+            ? player.hand.map(tileName).join(", ")
+            : `[${player.hand.length}张 - 对你不可见]`;
+        const discards = player.discards.map(tileName).join(" -> ") || "无";
+        const melds = player.melds
+            .map((meld) => `${meld.type}: ${meld.tiles.map(tileName).join(", ")}`)
+            .join(" | ") || "无";
+        return `Player ${player.id} ${player.name}${isTarget ? " (你)" : ""}
+- 手牌: ${hand}
+- 已打出: ${discards}
+- 副露: ${melds}
+- 分数: ${player.score}`;
+    }).join("\n\n");
+}
+
+function getRuleDescription(region: string): string {
+    switch (region) {
+        case "shengzhou":
+            return `嵊州麻将规则:
+- 136张牌（无花牌、无季节牌）
+- 财神（百搭）机制：翻一张牌，其下一张为财神，可代替任何牌组成顺子、刻子、对子
+- 自摸 +2番，庄家 +1番
+- 财鸟（手中1张财神）= 5番，飞鸟（手中连续2+张财神）= 10番起，每多一张翻倍
+- 杠开/抢杠 = 5番
+- 明杠 +1番，暗杠 +2番
+- 连庄翻倍（连庄N次，主番 × 2^(N-1)）
+- 底分 base = 8，总分 = base × 2^主番 × 连庄倍数 + base × 2^杠番
+- 番数上限 13
+- 承包：同一人吃碰达3次，该人需额外赔付
+- 飞鸟圈：打出财神后进入飞鸟圈，圈内只能胡不能吃碰杠，圈结束时打财神者永久失去点炮资格
+- 点炮限制：手中有财神时不能点炮胡`;
+        case "hangzhou":
+            return `杭州麻将规则:
+- 136张牌（无花牌、无季节牌）
+- 支持七对子胡牌
+- 标准吃碰杠规则`;
+        case "chinese":
+        default:
+            return `国标麻将规则:
+- 144张牌（含花牌、季节牌）
+- 标准吃碰杠胡规则
+- 花牌和季节牌自动补牌`;
+    }
+}
+
 function discardTimeline(gameState: GameState): string {
     const fromLogs = gameState.logs
         .filter((log) => /discarded/i.test(log))
@@ -69,19 +118,24 @@ function buildPrompt(request: MahjongAIRequest): string {
         : [];
 
     const legalTileIds = player.hand.map((tile) => tile.id).join(", ");
+    const ruleDesc = getRuleDescription(gameState.rules.region);
     const base = `
-你是一个麻将 AI 助手。请根据当前完整局面做出判断，并只返回 JSON，不要返回 Markdown。
+你是一个麻将 AI 助手。请根据当前局面做出判断，并只返回 JSON，不要返回 Markdown。
 
-规则区域: ${gameState.rules.region}
+=== 当前规则 ===
+${ruleDesc}
+
+=== 当前局面 ===
 当前阶段: ${gameState.phase}
 当前轮到: Player ${gameState.currentTurn}
 当前待处理弃牌: ${gameState.lastDiscard ? tileName(gameState.lastDiscard) : "无"}
 剩余牌墙: ${gameState.wallCount}
+${gameState.caishenTile ? `财神牌: ${tileName(gameState.caishenTile)}（翻牌: ${gameState.caishenSourceTile ? tileName(gameState.caishenSourceTile) : "无"}）` : ""}
 
-玩家信息:
-${playerSummary(gameState)}
+=== 玩家信息 ===
+${playerSummaryForAI(gameState, playerIndex)}
 
-所有弃牌顺序:
+=== 所有弃牌顺序 ===
 ${discardTimeline(gameState)}
 `;
 
@@ -114,12 +168,32 @@ ${discardTimeline(gameState)}
     if (mode === "analyze") {
         const actualAction = request.actualAction || "unknown";
         const actualTile = request.actualTile || "";
-        return `${base}
-任务: 分析 Player ${playerIndex} 的一步操作。
+        // Analyze mode: hide the analyzed player's hand — evaluate decision-making based on public info only
+        const analyzeBase = `
+你是一个麻将 AI 助手。请根据当前局面做出判断，并只返回 JSON，不要返回 Markdown。
+
+=== 当前规则 ===
+${ruleDesc}
+
+=== 当前局面 ===
+当前阶段: ${gameState.phase}
+当前轮到: Player ${gameState.currentTurn}
+当前待处理弃牌: ${gameState.lastDiscard ? tileName(gameState.lastDiscard) : "无"}
+剩余牌墙: ${gameState.wallCount}
+${gameState.caishenTile ? `财神牌: ${tileName(gameState.caishenTile)}（翻牌: ${gameState.caishenSourceTile ? tileName(gameState.caishenSourceTile) : "无"}）` : ""}
+
+=== 玩家信息（所有玩家手牌均不可见，基于公开信息分析） ===
+${playerSummaryForAI(gameState, -1)}
+
+=== 所有弃牌顺序 ===
+${discardTimeline(gameState)}
+`;
+        return `${analyzeBase}
+任务: 回顾分析 Player ${playerIndex} 的一步操作。你只能看到公开信息（弃牌、副露），不能看到任何玩家的手牌。
 实际执行的操作: ${actualAction} ${actualTile}
 
-请分析:
-1. 这个操作是否正确？
+请基于规则和公开信息分析:
+1. 这个操作是否正确？（考虑已打出的牌、副露信息、牌墙剩余等）
 2. 如果不正确，应该做什么？
 3. 这个操作的优点和缺点是什么？
 
@@ -149,16 +223,27 @@ ${discardTimeline(gameState)}
 
 function parseJson(content: string): unknown {
     const trimmed = content.trim();
+    // Try to extract JSON from markdown fenced code blocks
     const fenced = trimmed.match(/```(?:json)?\s*([\s\S]*?)```/i);
-    const jsonText = fenced ? fenced[1].trim() : trimmed;
-    return JSON.parse(jsonText);
+    if (fenced) {
+        return JSON.parse(fenced[1].trim());
+    }
+    // Try to find a JSON object in the response (LLM may include extra text)
+    const jsonMatch = trimmed.match(/\{[\s\S]*\}/);
+    if (jsonMatch) {
+        return JSON.parse(jsonMatch[0]);
+    }
+    return JSON.parse(trimmed);
 }
 
 function validateResponse(request: MahjongAIRequest, raw: unknown): MahjongAIResponse {
     const response = raw as MahjongAIResponse;
-    if (!response || typeof response !== "object" || typeof response.analysis !== "string") {
-        throw new Error("LLM response missing analysis");
+    if (!response || typeof response !== "object") {
+        throw new Error("LLM response is not a valid object");
     }
+    // Coerce analysis to string - LLM may return it in unexpected format
+    const analysis = typeof response.analysis === "string" ? response.analysis : 
+        (response.analysis ? String(response.analysis) : "LLM 未提供分析");
 
     const player = request.gameState.players[request.playerIndex];
     if ((request.mode === "discard" || response.discardTileId) &&
@@ -182,7 +267,7 @@ function validateResponse(request: MahjongAIRequest, raw: unknown): MahjongAIRes
     return {
         action: response.action,
         discardTileId: response.discardTileId,
-        analysis: response.analysis,
+        analysis,
         confidence: typeof response.confidence === "number" ? response.confidence : undefined,
         recommended: response.recommended,
         pros: response.pros,
@@ -205,25 +290,35 @@ export async function POST(request: Request) {
     try {
         const body = await request.json() as MahjongAIRequest;
         const prompt = buildPrompt(body);
-        const response = await fetch(`${baseUrl.replace(/\/$/, "")}/chat/completions`, {
-            method: "POST",
-            headers: {
-                "Content-Type": "application/json",
-                Authorization: `Bearer ${apiKey}`,
-            },
-            body: JSON.stringify({
-                model,
-                messages: [
-                    {
-                        role: "system",
-                        content: "你是严谨的麻将策略 AI。你必须返回可解析 JSON，并且只能选择用户给出的合法动作或 tile id。",
-                    },
-                    { role: "user", content: prompt },
-                ],
-                temperature: 0.4,
-                max_tokens: 1200,
-            }),
-        });
+        const controller = new AbortController();
+        const timeout = setTimeout(() => controller.abort(), 55000); // 55s server-side timeout (client has 60s)
+        let response: Response;
+        try {
+            response = await fetch(`${baseUrl.replace(/\/$/, "")}/chat/completions`, {
+                method: "POST",
+                headers: {
+                    "Content-Type": "application/json",
+                    Authorization: `Bearer ${apiKey}`,
+                },
+                body: JSON.stringify({
+                    model,
+                    messages: [
+                        {
+                            role: "system",
+                            content: `你是严谨的麻将策略 AI。你必须返回可解析 JSON，并且只能选择用户给出的合法动作或 tile id。
+你只能看到目标玩家的手牌，其他玩家的手牌对你不可见。你的分析必须基于当前麻将规则（嵊州/杭州/国标），考虑财神、番数、承包等特殊机制。
+严禁假设或猜测其他玩家手中有什么牌。`,
+                        },
+                        { role: "user", content: prompt },
+                    ],
+                    temperature: 0.4,
+                    max_tokens: 1200,
+                }),
+                signal: controller.signal,
+            });
+        } finally {
+            clearTimeout(timeout);
+        }
 
         if (!response.ok) {
             const errorText = await response.text();

@@ -67,7 +67,7 @@ export function recordLlmAdvice(gameState: GameState, advice: Omit<LlmAdviceReco
 
 export function recordAction(
     gameState: GameState,
-    action: Omit<GameActionRecord, "id" | "sequenceNumber" | "timestamp" | "gameStateSnapshot">
+    action: Omit<GameActionRecord, "id" | "sequenceNumber" | "timestamp" | "gameStateSnapshot"> & { actionSource?: GameActionRecord["actionSource"] }
 ): GameState {
     const record: GameActionRecord = {
         ...action,
@@ -75,6 +75,7 @@ export function recordAction(
         sequenceNumber: gameState.actionHistory.length,
         timestamp: Date.now(),
         gameStateSnapshot: createReplaySnapshot(gameState),
+        actionSource: action.actionSource ?? "rule_based",
     };
     return {
         ...gameState,
@@ -90,7 +91,7 @@ export function recordAction(
 //   - 点炮：承包者付3份
 //   - 自摸：承包者付5倍
 // discarderIndex: who discarded the winning tile (null for self-draw)
-function applyScoreChanges(
+export function applyScoreChanges(
     players: Player[],
     winnerIndex: number,
     discarderIndex: number | null,
@@ -156,7 +157,7 @@ function applyScoreChanges(
 }
 
 // 飞鸟赔偿计算: 连续打出财神的人，在该圈内若有人胡，需赔偿
-function calculateFeiniaoCompensation(consecutiveCount: number): { fan: number; name: string; amount: number } {
+export function calculateFeiniaoCompensation(consecutiveCount: number): { fan: number; name: string; amount: number } {
     const base = 8;
     let fan: number;
     let name: string;
@@ -174,7 +175,7 @@ function calculateFeiniaoCompensation(consecutiveCount: number): { fan: number; 
 }
 
 // Apply feiniao compensation: discarder pays winner extra
-function applyFeiniaoCompensation(
+export function applyFeiniaoCompensation(
     players: Player[],
     winnerIndex: number,
     discarderIndex: number,
