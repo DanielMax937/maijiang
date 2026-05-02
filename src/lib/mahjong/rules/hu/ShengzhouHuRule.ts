@@ -154,10 +154,11 @@ export class ShengzhouHuRule implements HuRule {
             return remaining === 0 && wildcards >= 0;
         }
 
-        // Find first non-zero key
+        // Find first non-zero key in sorted order (ensures deterministic behavior regardless of Map insertion order)
         let firstKey = "";
-        for (const [key, count] of countMap.entries()) {
-            if (count > 0) { firstKey = key; break; }
+        const sortedKeys = [...countMap.keys()].sort();
+        for (const key of sortedKeys) {
+            if ((countMap.get(key) || 0) > 0) { firstKey = key; break; }
         }
 
         if (!firstKey) {
