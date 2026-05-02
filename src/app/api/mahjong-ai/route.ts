@@ -29,22 +29,21 @@ function tileName(tile: Tile): string {
         flower: "花",
         season: "季",
     };
-    return `${tile.id} (${suitMap[tile.suit] || tile.suit} ${tile.rank})`;
+    return `${suitMap[tile.suit] || tile.suit}${tile.rank}`;
 }
 
-function playerSummary(gameState: GameState): string {
-    return gameState.players.map((player) => {
-        const hand = player.hand.map(tileName).join(", ");
-        const discards = player.discards.map(tileName).join(" -> ") || "无";
-        const melds = player.melds
-            .map((meld) => `${meld.type}: ${meld.tiles.map(tileName).join(", ")}`)
-            .join(" | ") || "无";
-        return `Player ${player.id} ${player.name}
-- 手牌: ${hand}
-- 已打出: ${discards}
-- 副露: ${melds}
-- 分数: ${player.score}`;
-    }).join("\n\n");
+// Short tile name with ID for discard selection (player needs ID to choose)
+function tileNameWithId(tile: Tile): string {
+    const suitMap: Record<string, string> = {
+        bamboo: "条",
+        character: "万",
+        dot: "筒",
+        wind: "风",
+        dragon: "箭牌",
+        flower: "花",
+        season: "季",
+    };
+    return `${tile.id}(${suitMap[tile.suit] || tile.suit}${tile.rank})`;
 }
 
 // Privacy-aware summary: only show target player's hand, public info for all
@@ -52,15 +51,18 @@ function playerSummaryForAI(gameState: GameState, targetPlayerIndex: number): st
     return gameState.players.map((player) => {
         const isTarget = player.id === targetPlayerIndex;
         const hand = isTarget
-            ? player.hand.map(tileName).join(", ")
-            : `[${player.hand.length}张 - 对你不可见]`;
-        const discards = player.discards.map(tileName).join(" -> ") || "无";
+            ? player.hand.map(tileNameWithId).join(", ")
+            : `[${player.hand.length}张]`;
+        // Only show last 10 discards to save tokens
+        const recentDiscards = player.discards.slice(-10);
+        const discards = recentDiscards.map(tileName).join(",") || "无";
+        const discardPrefix = player.discards.length > 10 ? `...前${player.discards.length - 10}张省略, ` : "";
         const melds = player.melds
-            .map((meld) => `${meld.type}: ${meld.tiles.map(tileName).join(", ")}`)
+            .map((meld) => `${meld.type}(${meld.tiles.map(tileName).join(",")})`)
             .join(" | ") || "无";
-        return `Player ${player.id} ${player.name}${isTarget ? " (你)" : ""}
+        return `P${player.id} ${player.name}${isTarget ? " (你)" : ""}
 - 手牌: ${hand}
-- 已打出: ${discards}
+- 弃牌: ${discardPrefix}${discards}
 - 副露: ${melds}
 - 分数: ${player.score}`;
     }).join("\n\n");
@@ -97,15 +99,17 @@ function getRuleDescription(region: string): string {
 }
 
 function discardTimeline(gameState: GameState): string {
-    const fromLogs = gameState.logs
-        .filter((log) => /discarded/i.test(log))
-        .map((log, index) => `${index + 1}. ${log}`);
-
-    if (fromLogs.length > 0) return fromLogs.join("\n");
-
-    return gameState.players
-        .flatMap((player) => player.discards.map((tile, index) => `${index + 1}. Player ${player.id}: ${tileName(tile)}`))
-        .join("\n") || "无";
+    // Compact timeline: only last 20 discards to save tokens
+    const allDiscards: string[] = [];
+    for (const player of gameState.players) {
+        for (let i = 0; i < player.discards.length; i++) {
+            allDiscards.push(`P${player.id}:${tileName(player.discards[i])}`);
+        }
+    }
+    const recent = allDiscards.slice(-20);
+    if (recent.length === 0) return "无";
+    const prefix = allDiscards.length > 20 ? `(最近20张) ` : "";
+    return prefix + recent.join(", ");
 }
 
 function buildPrompt(request: MahjongAIRequest): string {
@@ -117,25 +121,21 @@ function buildPrompt(request: MahjongAIRequest): string {
             .map(([action]) => action)
         : [];
 
-    const legalTileIds = player.hand.map((tile) => tile.id).join(", ");
+    const legalTileIds = player.hand.map((tile) => tileNameWithId(tile)).join(", ");
     const ruleDesc = getRuleDescription(gameState.rules.region);
-    const base = `
-你是一个麻将 AI 助手。请根据当前局面做出判断，并只返回 JSON，不要返回 Markdown。
+    const base = `你是麻将AI，只返回JSON。
 
-=== 当前规则 ===
+=== 规则 ===
 ${ruleDesc}
 
-=== 当前局面 ===
-当前阶段: ${gameState.phase}
-当前轮到: Player ${gameState.currentTurn}
-当前待处理弃牌: ${gameState.lastDiscard ? tileName(gameState.lastDiscard) : "无"}
-剩余牌墙: ${gameState.wallCount}
-${gameState.caishenTile ? `财神牌: ${tileName(gameState.caishenTile)}（翻牌: ${gameState.caishenSourceTile ? tileName(gameState.caishenSourceTile) : "无"}）` : ""}
+=== 局面 ===
+阶段:${gameState.phase} 轮到:P${gameState.currentTurn} 弃牌:${gameState.lastDiscard ? tileName(gameState.lastDiscard) : "无"} 牌墙:${gameState.wallCount}张
+${gameState.caishenTile ? `财神:${tileName(gameState.caishenTile)}` : ""}
 
-=== 玩家信息 ===
+=== 玩家 ===
 ${playerSummaryForAI(gameState, playerIndex)}
 
-=== 所有弃牌顺序 ===
+=== 弃牌序列 ===
 ${discardTimeline(gameState)}
 `;
 
@@ -168,43 +168,27 @@ ${discardTimeline(gameState)}
     if (mode === "analyze") {
         const actualAction = request.actualAction || "unknown";
         const actualTile = request.actualTile || "";
-        // Analyze mode: hide the analyzed player's hand — evaluate decision-making based on public info only
-        const analyzeBase = `
-你是一个麻将 AI 助手。请根据当前局面做出判断，并只返回 JSON，不要返回 Markdown。
+        const analyzeBase = `你是麻将AI，只返回JSON。
 
-=== 当前规则 ===
+=== 规则 ===
 ${ruleDesc}
 
-=== 当前局面 ===
-当前阶段: ${gameState.phase}
-当前轮到: Player ${gameState.currentTurn}
-当前待处理弃牌: ${gameState.lastDiscard ? tileName(gameState.lastDiscard) : "无"}
-剩余牌墙: ${gameState.wallCount}
-${gameState.caishenTile ? `财神牌: ${tileName(gameState.caishenTile)}（翻牌: ${gameState.caishenSourceTile ? tileName(gameState.caishenSourceTile) : "无"}）` : ""}
+=== 局面 ===
+阶段:${gameState.phase} 轮到:P${gameState.currentTurn} 弃牌:${gameState.lastDiscard ? tileName(gameState.lastDiscard) : "无"} 牌墙:${gameState.wallCount}张
+${gameState.caishenTile ? `财神:${tileName(gameState.caishenTile)}` : ""}
 
-=== 玩家信息（所有玩家手牌均不可见，基于公开信息分析） ===
+=== 玩家(手牌不可见) ===
 ${playerSummaryForAI(gameState, -1)}
 
-=== 所有弃牌顺序 ===
+=== 弃牌序列 ===
 ${discardTimeline(gameState)}
 `;
         return `${analyzeBase}
-任务: 回顾分析 Player ${playerIndex} 的一步操作。你只能看到公开信息（弃牌、副露），不能看到任何玩家的手牌。
-实际执行的操作: ${actualAction} ${actualTile}
-
-请基于规则和公开信息分析:
-1. 这个操作是否正确？（考虑已打出的牌、副露信息、牌墙剩余等）
-2. 如果不正确，应该做什么？
-3. 这个操作的优点和缺点是什么？
+任务: 分析P${playerIndex}的操作: ${actualAction} ${actualTile}
+基于公开信息(弃牌、副露、牌墙剩余)评价。
 
 返回格式:
-{
-  "analysis": "中文详细分析",
-  "recommended": "推荐的操作是什么",
-  "pros": ["优点1", "优点2"],
-  "cons": ["缺点1", "缺点2"],
-  "score": 0到100的质量评分
-}`;
+{"analysis":"分析","recommended":"推荐操作","pros":["优点"],"cons":["缺点"],"score":0-100}`;
     }
 
     return `${base}
@@ -290,6 +274,16 @@ export async function POST(request: Request) {
     try {
         const body = await request.json() as MahjongAIRequest;
         const prompt = buildPrompt(body);
+        
+        // Estimate token count (~2 chars per token for Chinese, ~4 for English)
+        const estimatedTokens = Math.ceil(prompt.length / 2);
+        console.log(`[mahjong-ai] mode=${body.mode} player=${body.playerIndex} prompt_chars=${prompt.length} est_tokens=${estimatedTokens}`);
+        
+        // Guard against exceeding model's 32K input limit
+        if (estimatedTokens > 28000) {
+            throw new Error(`Prompt too large (${estimatedTokens} estimated tokens). Try reducing game history.`);
+        }
+
         const controller = new AbortController();
         const timeout = setTimeout(() => controller.abort(), 55000); // 55s server-side timeout (client has 60s)
         let response: Response;
@@ -305,9 +299,7 @@ export async function POST(request: Request) {
                     messages: [
                         {
                             role: "system",
-                            content: `你是严谨的麻将策略 AI。你必须返回可解析 JSON，并且只能选择用户给出的合法动作或 tile id。
-你只能看到目标玩家的手牌，其他玩家的手牌对你不可见。你的分析必须基于当前麻将规则（嵊州/杭州/国标），考虑财神、番数、承包等特殊机制。
-严禁假设或猜测其他玩家手中有什么牌。`,
+                            content: `你是麻将策略AI。返回可解析JSON，只选择合法动作或tile id。基于当前规则分析，严禁猜测他人手牌。`,
                         },
                         { role: "user", content: prompt },
                     ],
@@ -322,7 +314,8 @@ export async function POST(request: Request) {
 
         if (!response.ok) {
             const errorText = await response.text();
-            throw new Error(`LLM provider failed: ${response.status} ${errorText}`);
+            console.error(`[mahjong-ai] LLM error: ${response.status}`, errorText.slice(0, 500));
+            throw new Error(`LLM provider failed: ${response.status} ${errorText.slice(0, 200)}`);
         }
 
         const data = await response.json();
@@ -331,6 +324,7 @@ export async function POST(request: Request) {
         return NextResponse.json(validateResponse(body, parsed), { status: 200 });
     } catch (error) {
         const message = error instanceof Error ? error.message : "Unknown Mahjong AI error";
+        console.error(`[mahjong-ai] Error:`, message);
         return NextResponse.json({ error: message }, { status: 500 });
     }
 }

@@ -728,13 +728,13 @@ export function Table({ region: initialRegion = "chinese" }: TableProps) {
     useEffect(() => {
         if (!gameState || gameState.isGameOver || gameState.isWaitingForAction || isPaused) return;
         if (!ceremonyComplete) return; // Wait for Shengzhou ceremony
-        if (gameState.currentTurn === 0 && gameState.players[0].hand.length % 3 === 1) {
+        // Only draw when it's actually the DRAW phase for player 0
+        if (gameState.phase === "DRAW" && gameState.currentTurn === 0 && gameState.players[0].hand.length % 3 === 1) {
             // Needs to draw
-            // Add small delay
             const timer = setTimeout(() => {
                 if (isPaused) return;
                 setGameState(prev => {
-                    if (!prev) return null;
+                    if (!prev || prev.phase !== "DRAW" || prev.currentTurn !== 0) return prev;
                     const newState = drawTile(prev);
                     if (autoPause) setIsPaused(true);
                     return newState;
@@ -742,7 +742,7 @@ export function Table({ region: initialRegion = "chinese" }: TableProps) {
             }, 500);
             return () => clearTimeout(timer);
         }
-    }, [gameState?.currentTurn, gameState?.players[0].hand.length, isPaused]);
+    }, [gameState?.currentTurn, gameState?.phase, gameState?.players[0]?.hand.length, isPaused]);
 
     // Real Action Availability based on Game Rules
     const getAvailableActions = (playerIndex: number) => {
@@ -1085,7 +1085,7 @@ export function Table({ region: initialRegion = "chinese" }: TableProps) {
             <GameLog
                 actions={gameState.actionHistory}
                 isVisible={showGameLog}
-                showLlmAnalysis={isLlmDebug}
+                showLlmAnalysis={isDevMode || isLlmDebug}
                 onClose={() => setShowGameLog(false)}
                 onToggleAnalysis={() => setIsLlmDebug(!isLlmDebug)}
             />
@@ -1287,7 +1287,9 @@ export function Table({ region: initialRegion = "chinese" }: TableProps) {
                 />
                 {thinkingPlayer !== null && (
                     <div className="absolute bottom-2 left-1/2 transform -translate-x-1/2 bg-amber-900/80 text-amber-300 text-xs px-3 py-1 rounded-full animate-pulse whitespace-nowrap">
-                        Bot {thinkingPlayer} 思考中...
+                        {gameState.phase === "RESOLVE"
+                            ? `等待玩家决策中 (${Object.keys(gameState.pendingActions).filter(k => !gameState.actionDecisions[Number(k)]).map(k => `P${k}`).join(",")})`
+                            : `Bot ${thinkingPlayer} 出牌思考中...`}
                     </div>
                 )}
             </div>
