@@ -20,16 +20,19 @@ function loadEnvLocal(): void {
 }
 
 function tileName(tile: Tile): string {
-    const suitMap: Record<string, string> = {
-        bamboo: "条",
-        character: "万",
-        dot: "筒",
-        wind: "风",
-        dragon: "箭牌",
-        flower: "花",
-        season: "季",
-    };
-    return `${suitMap[tile.suit] || tile.suit}${tile.rank}`;
+    if (tile.suit === "wind") {
+        const windMap: Record<string, string> = { east: "东风", south: "南风", west: "西风", north: "北风" };
+        return windMap[tile.rank as string] || `${tile.rank}风`;
+    }
+    if (tile.suit === "dragon") {
+        const dragonMap: Record<string, string> = { red: "红中", green: "发财", white: "白板" };
+        return dragonMap[tile.rank as string] || `${tile.rank}`;
+    }
+    const numMap: Record<number, string> = { 1: "一", 2: "二", 3: "三", 4: "四", 5: "五", 6: "六", 7: "七", 8: "八", 9: "九" };
+    const suitMap: Record<string, string> = { bamboo: "条", character: "万", dot: "筒" };
+    const suitName = suitMap[tile.suit] || tile.suit;
+    const rankName = numMap[tile.rank as number] || tile.rank;
+    return `${rankName}${suitName}`;
 }
 
 // Privacy-aware summary: only show target player's hand, public info for all
@@ -131,7 +134,7 @@ ${discardTimeline(gameState)}
 手牌: ${legalTiles}
 
 返回格式:
-{"discardTile":"必须是手牌中的一张牌名(如条1,万5,筒9等)","analysis":"中文分析","confidence":0.0-1.0}`;
+{"discardTile":"必须是手牌中的一张(如一条,五万,九筒,东风,红中等)","analysis":"中文分析","confidence":0.0-1.0}`;
     }
 
     if (mode === "action") {
@@ -174,12 +177,12 @@ ${discardTimeline(gameState)}
     }
 
     return `${base}
-任务: 你现在是 Player 0（人类玩家）的助手。分析 Player 0 当前牌型、大家已经打出的牌和顺序，并给出下一步建议。
-如果当前可操作，合法动作是: ${legalActions.join(", ") || "无特殊动作，可考虑弃牌"}
+任务: 你是P0(人类玩家)的助手。分析当前牌型和弃牌信息，给出建议。
+合法动作: ${legalActions.join(", ") || "无特殊动作，可考虑弃牌"}
 手牌: ${legalTiles}
 
 返回格式:
-{"action":"建议动作(可省略)","discardTile":"建议弃牌名(如条1,可省略)","analysis":"中文分析","confidence":0.0-1.0}`;
+{"action":"建议动作(可省略)","discardTile":"建议弃牌名(如一条,五万,可省略)","analysis":"中文分析","confidence":0.0-1.0}`;
 }
 
 function parseJson(content: string): unknown {

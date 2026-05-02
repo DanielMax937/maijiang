@@ -120,10 +120,11 @@ export function Table({ region: initialRegion = "chinese" }: TableProps) {
                 fallback: true,
             });
             setGameState((current) => {
+                llmInFlightRef.current = false;
+                setThinkingPlayer(null);
                 if (!current || current.isGameOver || current.phase !== "DISCARD" || current.currentTurn !== playerIndex) {
                     return current;
                 }
-                // Record action
                 const tile = current.players[playerIndex].hand.find(t => t.id === fallbackTileId);
                 const withAction = recordAction(current, {
                     playerIndex,
@@ -135,8 +136,6 @@ export function Table({ region: initialRegion = "chinese" }: TableProps) {
                 });
                 return discardTile(withAction, fallbackTileId);
             });
-            llmInFlightRef.current = false;
-            setThinkingPlayer(null);
             return;
         }
 
@@ -163,10 +162,11 @@ export function Table({ region: initialRegion = "chinese" }: TableProps) {
             });
 
             setGameState((current) => {
+                llmInFlightRef.current = false;
+                setThinkingPlayer(null);
                 if (!current || current.isGameOver || current.phase !== "DISCARD" || current.currentTurn !== playerIndex) {
                     return current;
                 }
-                // Record action with LLM analysis
                 const tile = current.players[playerIndex].hand.find(t => t.id === discardTileId);
                 const withAction = recordAction(current, {
                     playerIndex,
@@ -195,10 +195,11 @@ export function Table({ region: initialRegion = "chinese" }: TableProps) {
                 fallback: true,
             });
             setGameState((current) => {
+                llmInFlightRef.current = false;
+                setThinkingPlayer(null);
                 if (!current || current.isGameOver || current.phase !== "DISCARD" || current.currentTurn !== playerIndex) {
                     return current;
                 }
-                // Record action with fallback
                 const tile = current.players[playerIndex].hand.find(t => t.id === fallbackTileId);
                 const withAction = recordAction(current, {
                     playerIndex,
@@ -210,9 +211,6 @@ export function Table({ region: initialRegion = "chinese" }: TableProps) {
                 });
                 return discardTile(withAction, fallbackTileId);
             });
-        } finally {
-            llmInFlightRef.current = false;
-            setThinkingPlayer(null);
         }
     };
 
@@ -301,6 +299,8 @@ export function Table({ region: initialRegion = "chinese" }: TableProps) {
         }));
 
         setGameState((current) => {
+            llmInFlightRef.current = false;
+            setThinkingPlayer(null);
             if (!current || current.isGameOver || current.phase !== "RESOLVE") return current;
             const actionDecisions = { ...current.actionDecisions };
             let logs = [...current.logs];
@@ -310,7 +310,6 @@ export function Table({ region: initialRegion = "chinese" }: TableProps) {
                 if (!current.pendingActions[playerIndex] || actionDecisions[playerIndex]) return;
                 actionDecisions[playerIndex] = action;
                 logs = [...logs, action !== "pass" ? `Bot ${playerIndex} chooses ${action.toUpperCase()}` : `Bot ${playerIndex} passes`];
-                // Record action
                 stateWithActions = recordAction(stateWithActions, {
                     playerIndex,
                     action: action as any,
@@ -322,9 +321,6 @@ export function Table({ region: initialRegion = "chinese" }: TableProps) {
 
             return resolvePendingActions({ ...stateWithActions, actionDecisions, logs });
         });
-
-        llmInFlightRef.current = false;
-        setThinkingPlayer(null);
     };
 
     const requestHumanAdvice = async (state: GameState, availableActions: Partial<Record<MahjongAction, boolean>>) => {
@@ -1060,7 +1056,7 @@ export function Table({ region: initialRegion = "chinese" }: TableProps) {
                 <CaishenDisplay
                     caishenTile={gameState.caishenTile}
                     sourceTile={gameState.caishenSourceTile}
-                    className="fixed top-4 left-1/2 transform -translate-x-1/2 z-50"
+                    className="fixed top-14 right-4 z-40"
                 />
             )}
 
