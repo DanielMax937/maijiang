@@ -547,6 +547,16 @@ export function performCheck(gameState: GameState): GameState {
     const huResult = ruleSet.huRule.canHu(ctx);
     const canHu = huResult.success;
 
+    if (inCaishenRound) {
+        // Log blocked actions during 飞鸟圈 for debugging
+        const wouldChi = isNextPlayer && ruleSet.chiRule.canChi(ctx);
+        const wouldPeng = ruleSet.pengRule.canPeng(ctx);
+        const wouldGang = ruleSet.gangRule.canGang(ctx);
+        if (wouldChi || wouldPeng || wouldGang) {
+            newLogs.push(`  - 飞鸟圈中: Player ${checkIndex} 的吃/碰/杠被禁止 (只能胡)`);
+        }
+    }
+
     if (canChi) newLogs.push(`  - Player ${checkIndex} can Chi`);
     if (canPeng) newLogs.push(`  - Player ${checkIndex} can Peng`);
     if (canGang) newLogs.push(`  - Player ${checkIndex} can Gang`);

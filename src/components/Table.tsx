@@ -1060,6 +1060,13 @@ export function Table({ region: initialRegion = "chinese" }: TableProps) {
                 />
             )}
 
+            {/* 飞鸟圈 Warning Indicator */}
+            {gameState?.caishenDiscardRound && ceremonyComplete && !gameState.isGameOver && (
+                <div className="fixed top-28 right-4 z-40 bg-red-600 text-white px-3 py-1 rounded-md text-sm font-bold shadow-lg animate-pulse">
+                    🐦 飞鸟圈 (P{gameState.caishenDiscardRound.discarderIndex}打出财神 - 不能吃碰杠)
+                </div>
+            )}
+
             {/* Game Over Screen */}
             {gameState.isGameOver && !showReview && (
                 <GameOverScreen

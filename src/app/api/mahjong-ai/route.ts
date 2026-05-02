@@ -63,6 +63,16 @@ function getRuleDescription(region: string): string {
             return `嵊州麻将规则:
 - 136张牌（无花牌、无季节牌）
 - 财神（百搭）机制：翻一张牌，其下一张为财神，可代替任何牌组成顺子、刻子、对子
+
+【胡牌规则 - 极其重要】
+- 唯一胡牌牌型：4组面子（顺子或刻子）+ 1对将（雀头），财神可替代任何牌
+- 不存在七小对（七对子）胡法
+- 不存在碰碰胡（全刻子）特殊加番
+- 不存在清一色、混一色等花色加番
+- 不存在任何特殊牌型加番，只有基本胡牌型
+- 决策时不要追求清一色或特殊牌型，只需尽快凑齐4面子+1对
+
+【番数规则】
 - 自摸 +2番，庄家 +1番
 - 财鸟（手中1张财神）= 5番，飞鸟（手中连续2+张财神）= 10番起，每多一张翻倍
 - 杠开/抢杠 = 5番
@@ -70,6 +80,8 @@ function getRuleDescription(region: string): string {
 - 连庄翻倍（连庄N次，主番 × 2^(N-1)）
 - 底分 base = 8，总分 = base × 2^主番 × 连庄倍数 + base × 2^杠番
 - 番数上限 13
+
+【特殊规则】
 - 承包：同一人吃碰达3次，该人需额外赔付
 - 飞鸟圈：打出财神后进入飞鸟圈，圈内只能胡不能吃碰杠，圈结束时打财神者永久失去点炮资格
 - 点炮限制：手中有财神时不能点炮胡`;
@@ -119,7 +131,7 @@ ${ruleDesc}
 
 === 局面 ===
 阶段:${gameState.phase} 轮到:P${gameState.currentTurn} 弃牌:${gameState.lastDiscard ? tileName(gameState.lastDiscard) : "无"} 牌墙:${gameState.wallCount}张
-${gameState.caishenTile ? `财神:${tileName(gameState.caishenTile)}` : ""}
+${gameState.caishenTile ? `财神:${tileName(gameState.caishenTile)}` : ""}${gameState.caishenDiscardRound ? `\n⚠️ 飞鸟圈进行中 (P${gameState.caishenDiscardRound.discarderIndex}打出财神，圈内不能吃碰杠，只能胡)` : ""}
 
 === 玩家 ===
 ${playerSummaryForAI(gameState, playerIndex)}

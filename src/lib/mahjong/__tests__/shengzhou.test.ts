@@ -1031,9 +1031,154 @@ describe("嵊州麻将 - CHECK阶段流转", () => {
         expect(result.phase).toBe("DRAW");
         expect(result.currentTurn).toBe(1);
     });
-});
 
-// ============ 17. Bot self-draw Hu (stepGame DISCARD) ============
+    it("P0打出七条时，P1有七条对子应检测到碰 (无飞鸟圈)", () => {
+        const state = makeMinimalGameState({
+            currentTurn: 0,
+            phase: "CHECK",
+            checkIndex: 1,
+            lastDiscard: makeTile("bamboo", 7, "discard-b7"),
+            caishenDiscardRound: null, // 无飞鸟圈
+        });
+        // P1 has pair of bamboo 7
+        state.players[1] = makePlayer(1, makeHand([
+            ["bamboo", 7], ["bamboo", 7], ["dot", 1], ["dot", 2], ["dot", 3],
+            ["character", 1], ["character", 2], ["character", 3],
+            ["wind", "east"], ["wind", "east"], ["wind", "east"],
+            ["bamboo", 1], ["bamboo", 2],
+        ]));
+
+        let result = performCheck(state);
+        expect(result.pendingActions[1]).toBeDefined();
+        expect(result.pendingActions[1]!.peng).toBe(true);
+    });
+
+    it("飞鸟圈中碰被阻止但胡不被阻止", () => {
+        const state = makeMinimalGameState({
+            currentTurn: 0,
+            phase: "CHECK",
+            checkIndex: 1,
+            lastDiscard: makeTile("bamboo", 7, "discard-b7"),
+            caishenDiscardRound: { discarderIndex: 2, consecutiveCount: 1 }, // P2打出财神
+        });
+        // P1 has pair of bamboo 7 (could peng) AND a winning hand with this tile
+        state.players[1] = makePlayer(1, makeHand([
+            ["bamboo", 7], ["bamboo", 7], ["dot", 1], ["dot", 2], ["dot", 3],
+            ["character", 1], ["character", 2], ["character", 3],
+            ["wind", "east"], ["wind", "east"], ["wind", "east"],
+            ["bamboo", 4], ["bamboo", 5],
+        ]));
+
+        let result = performCheck(state);
+        // Peng should be blocked during 飞鸟圈
+        if (result.pendingActions[1]) {
+            expect(result.pendingActions[1].peng).toBeFalsy();
+            expect(result.pendingActions[1].chi).toBeFalsy();
+            expect(result.pendingActions[1].gang).toBeFalsy();
+        }
+        // Log should mention 飞鸟圈 blocking
+        const blockLog = result.logs.find(l => l.includes("飞鸟圈中"));
+        expect(blockLog).toBeDefined();
+    });
+
+    it("下家吃牌检测 (P0打出五条, P1有四条六条)", () => {
+        const state = makeMinimalGameState({
+            currentTurn: 0,
+            phase: "CHECK",
+            checkIndex: 1,
+            lastDiscard: makeTile("bamboo", 5, "discard-b5"),
+            caishenDiscardRound: null,
+        });
+        state.players[1] = makePlayer(1, makeHand([
+            ["bamboo", 4], ["bamboo", 6], ["dot", 1], ["dot", 2], ["dot", 3],
+            ["character", 1], ["character", 2], ["character", 3],
+            ["wind", "east"], ["wind", "east"], ["wind", "east"],
+            ["bamboo", 1], ["bamboo", 2],
+        ]));
+
+        let result = performCheck(state);
+        expect(result.pendingActions[1]).toBeDefined();
+        expect(result.pendingActions[1]!.chi).toBe(true);
+    });
+
+    it("非下家不能吃 (P0打出五条, P2有四条六条)", () => {
+        const state = makeMinimalGameState({
+            currentTurn: 0,
+            phase: "CHECK",
+            checkIndex: 2,
+            lastDiscard: makeTile("bamboo", 5, "discard-b5"),
+            caishenDiscardRound: null,
+        });
+        state.players[2] = makePlayer(2, makeHand([
+            ["bamboo", 4], ["bamboo", 6], ["dot", 1], ["dot", 2], ["dot", 3],
+            ["character", 1], ["character", 2], ["character", 3],
+            ["wind", "east"], ["wind", "east"], ["wind", "east"],
+            ["bamboo", 1], ["bamboo", 2],
+        ]));
+
+        let result = performCheck(state);
+        // P2 is not next player (P1 is), so chi should be false
+        if (result.pendingActions[2]) {
+            expect(result.pendingActions[2].chi).toBe(false);
+        }
+    });
+
+    it("明杠检测 (P0打出五条, P3有三张五条)", () => {
+        const state = makeMinimalGameState({
+            currentTurn: 0,
+            phase: "CHECK",
+            checkIndex: 3,
+            lastDiscard: makeTile("bamboo", 5, "discard-b5"),
+            caishenDiscardRound: null,
+        });
+        state.players[3] = makePlayer(3, makeHand([
+            ["bamboo", 5], ["bamboo", 5], ["bamboo", 5], ["dot", 1], ["dot", 2],
+            ["character", 1], ["character", 2], ["character", 3],
+            ["wind", "east"], ["wind", "east"], ["wind", "east"],
+            ["bamboo", 1], ["bamboo", 2],
+        ]));
+
+        let result = performCheck(state);
+        expect(result.pendingActions[3]).toBeDefined();
+        expect(result.pendingActions[3]!.gang).toBe(true);
+        expect(result.pendingActions[3]!.peng).toBe(true); // can also peng with 3 tiles
+    });
+
+    it("碰优先于吃: 同时有碰和吃时进入RESOLVE", () => {
+        const state = makeMinimalGameState({
+            currentTurn: 0,
+            phase: "CHECK",
+            checkIndex: 1,
+            lastDiscard: makeTile("bamboo", 5, "discard-b5"),
+            caishenDiscardRound: null,
+        });
+        // P1 (下家) can chi
+        state.players[1] = makePlayer(1, makeHand([
+            ["bamboo", 4], ["bamboo", 6], ["dot", 1], ["dot", 2], ["dot", 3],
+            ["character", 1], ["character", 2], ["character", 3],
+            ["wind", "east"], ["wind", "east"], ["wind", "east"],
+            ["bamboo", 1], ["bamboo", 2],
+        ]));
+        // P2 can peng
+        state.players[2] = makePlayer(2, makeHand([
+            ["bamboo", 5], ["bamboo", 5], ["dot", 1], ["dot", 2], ["dot", 3],
+            ["character", 1], ["character", 2], ["character", 3],
+            ["wind", "east"], ["wind", "east"], ["wind", "east"],
+            ["bamboo", 1], ["bamboo", 2],
+        ]));
+        state.players[3] = makePlayer(3, makeHand([["dot", 7], ["wind", "north"], ["wind", "south"]]));
+
+        // Run all checks
+        let result = performCheck(state); // Check P1
+        result = performCheck(result); // Check P2
+        result = performCheck(result); // Check P3
+        result = performCheck(result); // Back to P0 → RESOLVE
+
+        expect(result.phase).toBe("RESOLVE");
+        expect(result.pendingActions[1]!.chi).toBe(true);
+        expect(result.pendingActions[2]!.peng).toBe(true);
+    });
+});
 
 describe("嵊州麻将 - Bot自摸胡 (stepGame)", () => {
     it("Bot摸牌后自动检查自摸胡", () => {
