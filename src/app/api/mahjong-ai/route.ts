@@ -32,26 +32,12 @@ function tileName(tile: Tile): string {
     return `${suitMap[tile.suit] || tile.suit}${tile.rank}`;
 }
 
-// Short tile name with ID for discard selection (player needs ID to choose)
-function tileNameWithId(tile: Tile): string {
-    const suitMap: Record<string, string> = {
-        bamboo: "条",
-        character: "万",
-        dot: "筒",
-        wind: "风",
-        dragon: "箭牌",
-        flower: "花",
-        season: "季",
-    };
-    return `${tile.id}(${suitMap[tile.suit] || tile.suit}${tile.rank})`;
-}
-
 // Privacy-aware summary: only show target player's hand, public info for all
 function playerSummaryForAI(gameState: GameState, targetPlayerIndex: number): string {
     return gameState.players.map((player) => {
         const isTarget = player.id === targetPlayerIndex;
         const hand = isTarget
-            ? player.hand.map(tileNameWithId).join(", ")
+            ? player.hand.map(tileName).join(", ")
             : `[${player.hand.length}张]`;
         // Only show last 10 discards to save tokens
         const recentDiscards = player.discards.slice(-10);
@@ -121,7 +107,7 @@ function buildPrompt(request: MahjongAIRequest): string {
             .map(([action]) => action)
         : [];
 
-    const legalTileIds = player.hand.map((tile) => tileNameWithId(tile)).join(", ");
+    const legalTiles = player.hand.map((tile) => tileName(tile)).join(", ");
     const ruleDesc = getRuleDescription(gameState.rules.region);
     const base = `你是麻将AI，只返回JSON。
 
@@ -141,15 +127,11 @@ ${discardTimeline(gameState)}
 
     if (mode === "discard") {
         return `${base}
-任务: 为 Player ${playerIndex} 选择现在应该打出的牌。
-只能从这些 tile id 中选择: ${legalTileIds}
+任务: 为P${playerIndex}选择打出的牌。
+手牌: ${legalTiles}
 
 返回格式:
-{
-  "discardTileId": "必须是上面列出的 tile id",
-  "analysis": "中文说明，包含牌型、危险牌、进张或防守理由",
-  "confidence": 0.0到1.0之间的数字
-}`;
+{"discardTile":"必须是手牌中的一张牌名(如条1,万5,筒9等)","analysis":"中文分析","confidence":0.0-1.0}`;
     }
 
     if (mode === "action") {
@@ -194,15 +176,10 @@ ${discardTimeline(gameState)}
     return `${base}
 任务: 你现在是 Player 0（人类玩家）的助手。分析 Player 0 当前牌型、大家已经打出的牌和顺序，并给出下一步建议。
 如果当前可操作，合法动作是: ${legalActions.join(", ") || "无特殊动作，可考虑弃牌"}
-如果建议弃牌，discardTileId 必须从这些 tile id 中选择: ${legalTileIds}
+手牌: ${legalTiles}
 
 返回格式:
-{
-  "action": "chi|peng|gang|hu|pass 中的建议动作，可省略",
-  "discardTileId": "建议弃牌 tile id，可省略",
-  "analysis": "中文详细分析和建议",
-  "confidence": 0.0到1.0之间的数字
-}`;
+{"action":"建议动作(可省略)","discardTile":"建议弃牌名(如条1,可省略)","analysis":"中文分析","confidence":0.0-1.0}`;
 }
 
 function parseJson(content: string): unknown {
@@ -221,7 +198,7 @@ function parseJson(content: string): unknown {
 }
 
 function validateResponse(request: MahjongAIRequest, raw: unknown): MahjongAIResponse {
-    const response = raw as MahjongAIResponse;
+    const response = raw as Record<string, unknown>;
     if (!response || typeof response !== "object") {
         throw new Error("LLM response is not a valid object");
     }
@@ -230,32 +207,44 @@ function validateResponse(request: MahjongAIRequest, raw: unknown): MahjongAIRes
         (response.analysis ? String(response.analysis) : "LLM 未提供分析");
 
     const player = request.gameState.players[request.playerIndex];
-    if ((request.mode === "discard" || response.discardTileId) &&
-        !player.hand.some((tile) => tile.id === response.discardTileId)) {
-        throw new Error("LLM selected a tile that is not in hand");
+    
+    // Match discard tile by name (e.g. "条1") instead of ID
+    let discardTileId: string | undefined;
+    const discardTile = (response.discardTile as string) || (response.discardTileId as string);
+    if ((request.mode === "discard" || discardTile) && discardTile) {
+        // Try to find tile in hand by name match
+        const matchedTile = player.hand.find((tile) => {
+            const name = tileName(tile);
+            return name === discardTile || tile.id === discardTile;
+        });
+        if (!matchedTile) {
+            throw new Error(`LLM selected tile "${discardTile}" which is not in hand`);
+        }
+        discardTileId = matchedTile.id;
     }
 
     // Only validate action for "action" mode, not "advice" mode
-    if (request.mode === "action" && response.action) {
+    const action = response.action as MahjongAction | undefined;
+    if (request.mode === "action" && action) {
         const allowed = new Set<MahjongAction>(
             Object.entries(request.availableActions || {})
                 .filter(([, enabled]) => enabled)
-                .map(([action]) => action as MahjongAction)
+                .map(([a]) => a as MahjongAction)
         );
         allowed.add("pass");
-        if (!allowed.has(response.action)) {
+        if (!allowed.has(action)) {
             throw new Error("LLM selected an illegal action");
         }
     }
 
     return {
-        action: response.action,
-        discardTileId: response.discardTileId,
+        action,
+        discardTileId,
         analysis,
         confidence: typeof response.confidence === "number" ? response.confidence : undefined,
-        recommended: response.recommended,
-        pros: response.pros,
-        cons: response.cons,
+        recommended: response.recommended as string | undefined,
+        pros: response.pros as string[] | undefined,
+        cons: response.cons as string[] | undefined,
         score: typeof response.score === "number" ? response.score : undefined,
     };
 }
@@ -277,7 +266,9 @@ export async function POST(request: Request) {
         
         // Estimate token count (~2 chars per token for Chinese, ~4 for English)
         const estimatedTokens = Math.ceil(prompt.length / 2);
-        console.log(`[mahjong-ai] mode=${body.mode} player=${body.playerIndex} prompt_chars=${prompt.length} est_tokens=${estimatedTokens}`);
+        console.log(`\n[mahjong-ai] ===== mode=${body.mode} player=${body.playerIndex} chars=${prompt.length} est_tokens=${estimatedTokens} =====`);
+        console.log(prompt);
+        console.log(`[mahjong-ai] ===== END PROMPT =====\n`);
         
         // Guard against exceeding model's 32K input limit
         if (estimatedTokens > 28000) {

@@ -104,6 +104,7 @@ export function Table({ region: initialRegion = "chinese" }: TableProps) {
     };
 
     const runBotDiscardWithLLM = async (state: GameState) => {
+        if (llmInFlightRef.current) return; // Guard: already processing
         const playerIndex = state.currentTurn;
         const fallbackTileId = chooseBotDiscard(state.players[playerIndex].hand);
         llmInFlightRef.current = true;
@@ -216,6 +217,7 @@ export function Table({ region: initialRegion = "chinese" }: TableProps) {
     };
 
     const runBotActionsWithLLM = async (state: GameState) => {
+        if (llmInFlightRef.current) return; // Guard: already processing
         const pendingBotPlayers = Object.keys(state.pendingActions)
             .map(Number)
             .filter((playerIndex) => playerIndex !== 0 && !state.actionDecisions[playerIndex]);
@@ -549,7 +551,8 @@ export function Table({ region: initialRegion = "chinese" }: TableProps) {
         }
 
         // Only call LLM when it's the player's turn to act
-        const isDiscardPhase = gameState.phase === "DISCARD";
+        const hasFullHand = gameState.players[0].hand.length % 3 === 2;
+        const isDiscardPhase = gameState.phase === "DISCARD" && hasFullHand;
         const isResolvePhase = gameState.phase === "RESOLVE" && gameState.pendingActions[0] && !gameState.actionDecisions[0];
 
         if (!isDiscardPhase && !isResolvePhase) {
