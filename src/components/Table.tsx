@@ -54,6 +54,7 @@ export function Table({ region: initialRegion = "chinese" }: TableProps) {
     const [llmAnalysis, setLlmAnalysis] = useState<string | null>(null);
     const [isLlmLoading, setIsLlmLoading] = useState(false);
     const [llmAnalysisKey, setLlmAnalysisKey] = useState<string>("");
+    const llmAnalysisKeyRef = useRef<string>("");
 
     // Game persistence for training data
     const [gameId, setGameId] = useState(() => crypto.randomUUID());
@@ -562,13 +563,14 @@ export function Table({ region: initialRegion = "chinese" }: TableProps) {
         // Create a key to avoid duplicate requests
         const handKey = gameState.players[0].hand.map(t => t.id).sort().join(",");
         const actionKey = `${gameState.phase}-${gameState.currentTurn}-${handKey}`;
-        if (actionKey === llmAnalysisKey) return;
+        if (actionKey === llmAnalysisKeyRef.current) return;
 
+        // Set key immediately via ref to prevent duplicate calls from re-renders
+        llmAnalysisKeyRef.current = actionKey;
+        setLlmAnalysisKey(actionKey);
         setIsLlmLoading(true);
 
         const fetchAnalysis = async () => {
-            setLlmAnalysisKey(actionKey);
-
             try {
                 const availableActions = isResolvePhase ? gameState.pendingActions[0] : undefined;
                 const response = await requestMahjongAI({
@@ -595,7 +597,8 @@ export function Table({ region: initialRegion = "chinese" }: TableProps) {
         };
 
         void fetchAnalysis();
-    }, [gameState?.currentTurn, gameState?.phase, gameState?.players[0]?.hand, gameState?.pendingActions, llmAnalysisKey]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [gameState?.currentTurn, gameState?.phase, gameState?.players[0]?.hand, gameState?.pendingActions]);
 
     const findScriptTileId = (state: GameState, playerIndex: number, requestedTile?: string) => {
         const hand = state.players[playerIndex]?.hand || [];
@@ -740,10 +743,29 @@ export function Table({ region: initialRegion = "chinese" }: TableProps) {
         if (gameState.currentTurn !== 0 || gameState.phase !== "DISCARD") return;
         if (pendingDiscardRef.current) return;
 
-        pendingDiscardRef.current = selectedTileId;
-        setPendingDiscardTileId(selectedTileId);
+        const tileId = selectedTileId;
         setSelectedTileId(null);
         playSound("tileDiscard");
+
+        // Directly apply the discard via setGameState
+        setGameState(prev => {
+            if (!prev || prev.phase !== "DISCARD" || prev.currentTurn !== 0) return prev;
+            const tile = prev.players[0].hand.find(t => t.id === tileId);
+            if (!tile) {
+                console.error(`[handleDiscardSelected] Tile ${tileId} not found in hand!`);
+                return prev;
+            }
+            let newState = recordAction(prev, {
+                playerIndex: 0,
+                action: "discard",
+                tile,
+                actionSource: "human",
+            });
+            newState = discardTile(newState, tileId);
+            setLlmAnalysis(null);
+            setIsLlmLoading(false);
+            return { ...newState, selfDrawPassed: false };
+        });
     };
 
     // Auto-draw for Player 0
@@ -1384,19 +1406,13 @@ export function Table({ region: initialRegion = "chinese" }: TableProps) {
                             availableActions={getAvailableActions(0)}
                             onAction={(action: string) => handleAction(action, 0)}
                             timer={gameState.actionTimer}
-                            disabled={isLlmLoading}
+                            disabled={false}
                         />
                         {/* Discard button - shown when a tile is selected */}
-                        {selectedTileId && gameState.currentTurn === 0 && gameState.phase === "DISCARD" && !pendingDiscardRef.current && (
+                        {selectedTileId && gameState.currentTurn === 0 && gameState.phase === "DISCARD" && (
                             <button
                                 onClick={handleDiscardSelected}
-                                disabled={isLlmLoading}
-                                className={cn(
-                                    "px-4 py-2 text-sm font-bold rounded-lg shadow-lg transition-colors",
-                                    isLlmLoading
-                                        ? "bg-gray-600 text-gray-400 cursor-not-allowed"
-                                        : "bg-red-600 hover:bg-red-500 text-white animate-pulse"
-                                )}
+                                className="px-4 py-2 text-sm font-bold rounded-lg shadow-lg transition-colors bg-red-600 hover:bg-red-500 text-white animate-pulse"
                             >
                                 出牌
                             </button>
@@ -1409,7 +1425,7 @@ export function Table({ region: initialRegion = "chinese" }: TableProps) {
                             isCurrentPlayer={gameState.currentTurn === 0}
                             onTileClick={handleTileClick}
                             tenpaiTileIds={tenpaiTileIds}
-                            disabled={isLlmLoading}
+                            disabled={false}
                             caishenTile={gameState.caishenTile}
                             selectedTileId={selectedTileId}
                         />
