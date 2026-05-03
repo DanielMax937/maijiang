@@ -733,6 +733,8 @@ export function Table({ region: initialRegion = "chinese" }: TableProps) {
         if (gameState.currentTurn !== 0) return;
         if (gameState.phase !== "DISCARD") return;
         if (pendingDiscardRef.current) return; // Already pending
+        // 【重要】LLM分析期间禁止选牌，必须等AI建议完成
+        if (isLlmLoading) return;
 
         // Toggle selection
         setSelectedTileId(prev => prev === tileId ? null : tileId);
@@ -742,8 +744,12 @@ export function Table({ region: initialRegion = "chinese" }: TableProps) {
         if (!selectedTileId || !gameState) return;
         if (gameState.currentTurn !== 0 || gameState.phase !== "DISCARD") return;
         if (pendingDiscardRef.current) return;
+        // 【重要】LLM分析期间禁止出牌，必须等AI建议完成
+        if (isLlmLoading) return;
 
         const tileId = selectedTileId;
+        // Capture current LLM analysis before clearing it
+        const currentAnalysis = llmAnalysis;
         setSelectedTileId(null);
         playSound("tileDiscard");
 
@@ -760,6 +766,7 @@ export function Table({ region: initialRegion = "chinese" }: TableProps) {
                 action: "discard",
                 tile,
                 actionSource: "human",
+                llmAnalysis: currentAnalysis || undefined,
             });
             newState = discardTile(newState, tileId);
             setLlmAnalysis(null);
@@ -832,6 +839,8 @@ export function Table({ region: initialRegion = "chinese" }: TableProps) {
 
     const handleAction = (action: string, playerIndex: number = 0) => {
         if (!gameState) return;
+        // 【重要】LLM分析期间禁止操作，必须等AI建议完成
+        if (isLlmLoading && playerIndex === 0) return;
         console.log(`Player ${playerIndex} chose ${action}`);
 
         // Handle self-draw actions (during DISCARD phase, player's own turn)
@@ -946,9 +955,17 @@ export function Table({ region: initialRegion = "chinese" }: TableProps) {
         else if (action === "peng") playSound("tilePeng");
         else if (action === "chi") playSound("tileChi");
 
-        // 1. Record Decision
+        // 1. Record the human action decision with LLM advice
         const newDecisions = { ...gameState.actionDecisions, [playerIndex]: action };
-        let newState = { ...gameState, actionDecisions: newDecisions };
+        let newState = recordAction(
+            { ...gameState, actionDecisions: newDecisions },
+            {
+                playerIndex,
+                action: action as any,
+                actionSource: "human",
+                llmAnalysis: llmAnalysis || undefined,
+            }
+        );
 
         // 2. Check if all pending players have decided
         const pendingPlayers = Object.keys(newState.pendingActions).map(Number);
@@ -1402,17 +1419,24 @@ export function Table({ region: initialRegion = "chinese" }: TableProps) {
                 <div className="absolute bottom-4 left-1/2 transform -translate-x-1/2 pointer-events-auto">
                     {/* Action Buttons ONLY for Player 0 */}
                     <div className="absolute -top-24 left-1/2 transform -translate-x-1/2 flex items-center gap-2">
+                        {/* 【重要】用户回合LLM分析期间，禁止操作（出牌/吃碰杠胡），避免用户在AI建议出来前做决策 */}
                         <ActionButtons
                             availableActions={getAvailableActions(0)}
                             onAction={(action: string) => handleAction(action, 0)}
                             timer={gameState.actionTimer}
-                            disabled={false}
+                            disabled={isLlmLoading}
                         />
-                        {/* Discard button - shown when a tile is selected */}
+                        {/* Discard button - shown when a tile is selected; disabled during LLM analysis */}
                         {selectedTileId && gameState.currentTurn === 0 && gameState.phase === "DISCARD" && (
                             <button
                                 onClick={handleDiscardSelected}
-                                className="px-4 py-2 text-sm font-bold rounded-lg shadow-lg transition-colors bg-red-600 hover:bg-red-500 text-white animate-pulse"
+                                disabled={isLlmLoading}
+                                className={cn(
+                                    "px-4 py-2 text-sm font-bold rounded-lg shadow-lg transition-colors",
+                                    isLlmLoading
+                                        ? "bg-gray-600 text-gray-400 cursor-not-allowed"
+                                        : "bg-red-600 hover:bg-red-500 text-white animate-pulse"
+                                )}
                             >
                                 出牌
                             </button>
@@ -1420,12 +1444,13 @@ export function Table({ region: initialRegion = "chinese" }: TableProps) {
                     </div>
                     <div className="flex items-end gap-2">
                         <MeldDisplay melds={player.melds} />
+                        {/* 【重要】用户回合LLM分析期间，禁止选牌操作，必须等AI建议完成后才能操作 */}
                         <Hand
                             tiles={player.hand}
                             isCurrentPlayer={gameState.currentTurn === 0}
                             onTileClick={handleTileClick}
                             tenpaiTileIds={tenpaiTileIds}
-                            disabled={false}
+                            disabled={isLlmLoading}
                             caishenTile={gameState.caishenTile}
                             selectedTileId={selectedTileId}
                         />

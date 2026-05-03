@@ -27,8 +27,8 @@ export interface MahjongAIResponse {
 
 export async function requestMahjongAI(request: MahjongAIRequest): Promise<MahjongAIResponse> {
     const controller = new AbortController();
-    // All LLM calls allow up to 60s — AI analysis may take longer with complex game states
-    const timeoutMs = 60000;
+    // All LLM calls allow up to 95s — AI analysis may take longer with complex game states
+    const timeoutMs = 95000;
     const timeout = setTimeout(() => controller.abort(), timeoutMs);
 
     try {

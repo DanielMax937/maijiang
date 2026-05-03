@@ -303,8 +303,9 @@ export async function POST(request: Request) {
         return NextResponse.json({ error: "Missing OPENAI_API_KEY, OPENAI_BASE_URL, or OPENAI_MODEL" }, { status: 500 });
     }
 
+    let body: MahjongAIRequest | null = null;
     try {
-        const body = await request.json() as MahjongAIRequest;
+        body = await request.json() as MahjongAIRequest;
         const prompt = buildPrompt(body);
         
         // Estimate token count (~2 chars per token for Chinese, ~4 for English)
@@ -319,7 +320,7 @@ export async function POST(request: Request) {
         }
 
         const controller = new AbortController();
-        const timeout = setTimeout(() => controller.abort(), 55000); // 55s server-side timeout (client has 60s)
+        const timeout = setTimeout(() => controller.abort(), 90000); // 90s server-side timeout (client has 95s)
         let response: Response;
         try {
             response = await fetch(`${baseUrl.replace(/\/$/, "")}/chat/completions`, {
@@ -359,7 +360,9 @@ export async function POST(request: Request) {
         return NextResponse.json(validateResponse(body, parsed), { status: 200 });
     } catch (error) {
         const message = error instanceof Error ? error.message : "Unknown Mahjong AI error";
-        console.error(`[mahjong-ai] Error:`, message);
+        const stack = error instanceof Error ? error.stack : undefined;
+        console.error(`[mahjong-ai] Error (mode=${body?.mode} player=${body?.playerIndex}):`, message);
+        if (stack) console.error(`[mahjong-ai] Stack:`, stack);
         return NextResponse.json({ error: message }, { status: 500 });
     }
 }
