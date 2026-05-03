@@ -13,8 +13,8 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "Mahjong World - 杭州麻将",
-  description: "Play Hangzhou Mahjong online",
+  title: "Mahjong World",
+  description: "Play Mahjong online",
 };
 
 export default function RootLayout({

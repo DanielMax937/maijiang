@@ -20,17 +20,19 @@ function getTileSvg(tile: TileType): string {
 
 export function CaishenReveal({ sourceTile, caishenTile, onComplete }: CaishenRevealProps) {
     const [phase, setPhase] = useState<"flip" | "reveal" | "show">("flip");
+    const onCompleteRef = React.useRef(onComplete);
+    onCompleteRef.current = onComplete;
 
     useEffect(() => {
-        const t1 = setTimeout(() => setPhase("reveal"), 1000);
-        const t2 = setTimeout(() => setPhase("show"), 2000);
-        const t3 = setTimeout(onComplete, 3500);
+        const t1 = setTimeout(() => setPhase("reveal"), 500);
+        const t2 = setTimeout(() => setPhase("show"), 1200);
+        const t3 = setTimeout(() => onCompleteRef.current(), 2500);
         return () => {
             clearTimeout(t1);
             clearTimeout(t2);
             clearTimeout(t3);
         };
-    }, [onComplete]);
+    }, []);
 
     return (
         <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/70 backdrop-blur-sm">

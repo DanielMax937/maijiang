@@ -12,10 +12,10 @@ interface HandProps {
     disabled?: boolean;
     className?: string;
     caishenTile?: TileType;
+    selectedTileId?: string | null;
 }
 
-export function Hand({ tiles, isCurrentPlayer, onTileClick, faceDown, tenpaiTileIds, disabled = false, className, caishenTile }: HandProps) {
-    const [selectedTileId, setSelectedTileId] = React.useState<string | null>(null);
+export function Hand({ tiles, isCurrentPlayer, onTileClick, faceDown, tenpaiTileIds, disabled = false, className, caishenTile, selectedTileId }: HandProps) {
 
     const isCaishen = (tile: TileType) => {
         if (!caishenTile) return false;
@@ -34,7 +34,6 @@ export function Hand({ tiles, isCurrentPlayer, onTileClick, faceDown, tenpaiTile
                     isCaishen={isCaishen(tile)}
                     onClick={() => {
                         if (isCurrentPlayer && onTileClick && !disabled) {
-                            setSelectedTileId(tile.id);
                             onTileClick(tile.id);
                         }
                     }}

@@ -968,12 +968,16 @@ describe("嵊州麻将 - 初始化", () => {
         expect(tilesInHands + state.wallCount + 1).toBe(136);
     });
 
-    it("初始化: 骰子值在1-6之间", () => {
+    it("初始化: 骰子值在1-6之间, 庄家按sum+max计算", () => {
         const state = initializeGame("shengzhou");
-        expect(state.diceValues[0]).toBeGreaterThanOrEqual(1);
-        expect(state.diceValues[0]).toBeLessThanOrEqual(6);
-        expect(state.diceValues[1]).toBeGreaterThanOrEqual(1);
-        expect(state.diceValues[1]).toBeLessThanOrEqual(6);
+        expect(state.diceValues![0]).toBeGreaterThanOrEqual(1);
+        expect(state.diceValues![0]).toBeLessThanOrEqual(6);
+        expect(state.diceValues![1]).toBeGreaterThanOrEqual(1);
+        expect(state.diceValues![1]).toBeLessThanOrEqual(6);
+        // Dealer index should be (sum + max) % 4
+        const d1 = state.diceValues![0];
+        const d2 = state.diceValues![1];
+        expect(state.dealerIndex).toBe((d1 + d2 + Math.max(d1, d2)) % 4);
     });
 });
 

@@ -60,6 +60,7 @@ export function Table({ region: initialRegion = "chinese" }: TableProps) {
     const [deferredAnalysisMode, setDeferredAnalysisMode] = useState(false);
     const [pendingDiscardTileId, setPendingDiscardTileId] = useState<string | null>(null);
     const [showReview, setShowReview] = useState(false);
+    const [selectedTileId, setSelectedTileId] = useState<string | null>(null);
 
     // Shengzhou game start ceremony states
     const [showDiceAnimation, setShowDiceAnimation] = useState(false);
@@ -434,6 +435,7 @@ export function Table({ region: initialRegion = "chinese" }: TableProps) {
                     });
                     newState = discardTile(newState, tileId);
                     setPendingDiscardTileId(null);
+                    setSelectedTileId(null);
                     setLlmAnalysis(null);
                     setIsLlmLoading(false);
                     return { ...newState, selfDrawPassed: false };
@@ -576,6 +578,14 @@ export function Table({ region: initialRegion = "chinese" }: TableProps) {
                     availableActions,
                 });
                 setLlmAnalysis(response.analysis);
+                // Record human advice into GameLog
+                recordAdviceOnCurrentState({
+                    playerIndex: 0,
+                    mode: isResolvePhase ? "action" : "discard",
+                    result: response.action || response.discardTileId || "advice",
+                    analysis: response.analysis,
+                    fallback: response.fallback,
+                });
             } catch (err) {
                 const message = err instanceof Error ? err.message : "Unknown error";
                 setLlmAnalysis(`分析失败: ${message}`);
@@ -681,6 +691,9 @@ export function Table({ region: initialRegion = "chinese" }: TableProps) {
             setGameState(prev => {
                 if (!prev || prev.isGameOver) return prev;
 
+                // Don't auto-pass while LLM is processing bot decisions
+                if (llmInFlightRef.current) return prev;
+
                 // If timer hits 0 and we are waiting for actions, auto-pass undecided players
                 if (prev.actionTimer <= 0 && prev.isWaitingForAction) {
                     const newState = { ...prev };
@@ -713,13 +726,23 @@ export function Table({ region: initialRegion = "chinese" }: TableProps) {
 
     const handleTileClick = (tileId: string) => {
         if (!gameState) return;
-        if (gameState.isWaitingForAction) return; // Can't discard while waiting
+        if (gameState.isWaitingForAction) return;
         if (gameState.currentTurn !== 0) return;
+        if (gameState.phase !== "DISCARD") return;
         if (pendingDiscardRef.current) return; // Already pending
 
-        pendingDiscardRef.current = tileId;
-        // Force re-render so the game loop picks up the pending discard
-        setPendingDiscardTileId(tileId);
+        // Toggle selection
+        setSelectedTileId(prev => prev === tileId ? null : tileId);
+    };
+
+    const handleDiscardSelected = () => {
+        if (!selectedTileId || !gameState) return;
+        if (gameState.currentTurn !== 0 || gameState.phase !== "DISCARD") return;
+        if (pendingDiscardRef.current) return;
+
+        pendingDiscardRef.current = selectedTileId;
+        setPendingDiscardTileId(selectedTileId);
+        setSelectedTileId(null);
         playSound("tileDiscard");
     };
 
@@ -1356,13 +1379,28 @@ export function Table({ region: initialRegion = "chinese" }: TableProps) {
             <div className="fixed bottom-0 left-0 right-0 h-32 z-10 pointer-events-none">
                 <div className="absolute bottom-4 left-1/2 transform -translate-x-1/2 pointer-events-auto">
                     {/* Action Buttons ONLY for Player 0 */}
-                    <div className="absolute -top-24 left-1/2 transform -translate-x-1/2">
+                    <div className="absolute -top-24 left-1/2 transform -translate-x-1/2 flex items-center gap-2">
                         <ActionButtons
                             availableActions={getAvailableActions(0)}
                             onAction={(action: string) => handleAction(action, 0)}
                             timer={gameState.actionTimer}
-                            disabled={false}
+                            disabled={isLlmLoading}
                         />
+                        {/* Discard button - shown when a tile is selected */}
+                        {selectedTileId && gameState.currentTurn === 0 && gameState.phase === "DISCARD" && !pendingDiscardRef.current && (
+                            <button
+                                onClick={handleDiscardSelected}
+                                disabled={isLlmLoading}
+                                className={cn(
+                                    "px-4 py-2 text-sm font-bold rounded-lg shadow-lg transition-colors",
+                                    isLlmLoading
+                                        ? "bg-gray-600 text-gray-400 cursor-not-allowed"
+                                        : "bg-red-600 hover:bg-red-500 text-white animate-pulse"
+                                )}
+                            >
+                                出牌
+                            </button>
+                        )}
                     </div>
                     <div className="flex items-end gap-2">
                         <MeldDisplay melds={player.melds} />
@@ -1371,8 +1409,9 @@ export function Table({ region: initialRegion = "chinese" }: TableProps) {
                             isCurrentPlayer={gameState.currentTurn === 0}
                             onTileClick={handleTileClick}
                             tenpaiTileIds={tenpaiTileIds}
-                            disabled={false}
+                            disabled={isLlmLoading}
                             caishenTile={gameState.caishenTile}
+                            selectedTileId={selectedTileId}
                         />
                     </div>
 

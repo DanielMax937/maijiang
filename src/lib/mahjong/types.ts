@@ -193,6 +193,7 @@ export interface GameActionRecord {
     tile?: Tile;
     timestamp: number;
     gameStateSnapshot: ReplayEvent["snapshot"]; // Full snapshot at this point
+    actionSource: "human" | "llm" | "rule_based"; // Who made this decision
     llmAnalysis?: string; // LLM analysis for this action
     isLlmFallback?: boolean; // Whether LLM fallback was used
     deferredAnalysis?: DeferredAnalysis; // Filled in during review

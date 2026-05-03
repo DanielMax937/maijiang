@@ -229,7 +229,7 @@ export function initializeGame(
         dealerIndex = previousDealerIndex;
         dealerStreak = (previousDealerStreak || 0) + 1;
     } else {
-        dealerIndex = region === "shengzhou" ? (dice1 + dice2) % 4 : 0;
+        dealerIndex = region === "shengzhou" ? (dice1 + dice2 + Math.max(dice1, dice2)) % 4 : 0;
         dealerStreak = 1;
     }
 

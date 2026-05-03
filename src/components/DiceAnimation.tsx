@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import { cn } from "@/lib/utils";
 
 interface DiceAnimationProps {
@@ -19,10 +19,12 @@ export function DiceAnimation({ diceValues, onComplete }: DiceAnimationProps) {
     const [rolling, setRolling] = useState(true);
     const [currentFaces, setCurrentFaces] = useState<[number, number]>([1, 1]);
     const [showResult, setShowResult] = useState(false);
+    const onCompleteRef = useRef(onComplete);
+    onCompleteRef.current = onComplete;
 
     useEffect(() => {
         let frame = 0;
-        const totalFrames = 20;
+        const totalFrames = 12;
         const interval = setInterval(() => {
             frame++;
             setCurrentFaces([
@@ -34,12 +36,12 @@ export function DiceAnimation({ diceValues, onComplete }: DiceAnimationProps) {
                 setCurrentFaces(diceValues);
                 setRolling(false);
                 setShowResult(true);
-                setTimeout(onComplete, 1500);
+                setTimeout(() => onCompleteRef.current(), 1000);
             }
-        }, 80);
+        }, 60);
 
         return () => clearInterval(interval);
-    }, [diceValues, onComplete]);
+    }, [diceValues]);
 
     return (
         <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/70 backdrop-blur-sm">
@@ -69,12 +71,12 @@ export function DiceAnimation({ diceValues, onComplete }: DiceAnimationProps) {
                 {showResult && (
                     <div className="flex flex-col items-center gap-2 animate-fade-in">
                         <div className="text-3xl font-bold text-white">
-                            {diceValues[0]} + {diceValues[1]} = {diceValues[0] + diceValues[1]}
+                            {diceValues[0]} + {diceValues[1]} + max({diceValues[0]},{diceValues[1]}) = {diceValues[0] + diceValues[1] + Math.max(diceValues[0], diceValues[1])}
                         </div>
                         <div className="text-lg text-amber-300">
-                            {((diceValues[0] + diceValues[1]) % 4) === 0
+                            {((diceValues[0] + diceValues[1] + Math.max(diceValues[0], diceValues[1])) % 4) === 0
                                 ? "你是庄家！"
-                                : `Bot ${(diceValues[0] + diceValues[1]) % 4} 是庄家`}
+                                : `Bot ${(diceValues[0] + diceValues[1] + Math.max(diceValues[0], diceValues[1])) % 4} 是庄家`}
                         </div>
                     </div>
                 )}
