@@ -141,18 +141,46 @@ ${discardTimeline(gameState)}
 `;
 
     if (mode === "discard") {
+        // Warn about caishen tiles in hand
+        let caishenWarning = "";
+        if (gameState.caishenTile) {
+            const caishenName = tileName(gameState.caishenTile);
+            const caishenCount = player.hand.filter(t => 
+                t.suit === gameState.caishenTile!.suit && t.rank === gameState.caishenTile!.rank
+            ).length;
+            if (caishenCount > 0) {
+                caishenWarning = `\n\n⚠️ 【绝对禁止】手中有${caishenCount}张财神(${caishenName})！财神是万能百搭牌，可替代任何牌组成面子。绝对不能打出财神！打出财神会：1)失去万能牌 2)触发飞鸟圈(所有人不能吃碰杠) 3)永久失去点炮胡资格。除非想故意飞鸟（极罕见策略），否则任何情况下都不要打出财神。`;
+            }
+        }
         return `${base}
 任务: 为P${playerIndex}选择打出的牌。
-手牌: ${legalTiles}
+手牌: ${legalTiles}${caishenWarning}
 
 返回格式:
 {"discardTile":"必须是手牌中的一张(如一条,五万,九筒,东风,红中等)","analysis":"中文分析","confidence":0.0-1.0}`;
     }
 
     if (mode === "action") {
+        // Build strategic guidance based on available actions
+        const actionGuidance: string[] = [];
+        if (legalActions.includes("hu")) {
+            actionGuidance.push("- 胡: 能胡必胡，这是最高优先级");
+        }
+        if (legalActions.includes("gang")) {
+            actionGuidance.push("- 杠: 杠能加番且补牌，通常应该杠");
+        }
+        if (legalActions.includes("peng")) {
+            actionGuidance.push("- 碰: 碰能形成刻子（面子），减少听牌距离。除非碰了反而拆散更好的搭子，否则通常应该碰");
+        }
+        if (legalActions.includes("chi")) {
+            actionGuidance.push("- 吃: 吃能形成顺子（面子），如果能减少听牌距离则应该吃");
+        }
+        const guidanceText = actionGuidance.length > 0 ? `\n\n【决策参考】\n${actionGuidance.join("\n")}\n注意: 碰/杠几乎总是有利的，除非手牌搭子非常好不需要。pass通常只在手牌结构很好时才选择。` : "";
+
         return `${base}
 任务: 为 Player ${playerIndex} 在别人弃牌后选择反应。
 只能从这些动作中选择: ${legalActions.join(", ") || "pass"}
+当前手牌: ${legalTiles}${guidanceText}
 
 返回格式:
 {
@@ -326,6 +354,7 @@ export async function POST(request: Request) {
 
         const data = await response.json();
         const content = data.choices?.[0]?.message?.content || "{}";
+        console.log(`[mahjong-ai] LLM response (mode=${body.mode} player=${body.playerIndex}):`, content.slice(0, 500));
         const parsed = parseJson(content);
         return NextResponse.json(validateResponse(body, parsed), { status: 200 });
     } catch (error) {
